@@ -51,7 +51,7 @@ FRAME_DELAY = 0.0
 # callback returns quickly and avoids pipeline backpressure lag.
 # 1 = render every frame (60 FPS target), 2 = every other frame (30 FPS),
 # 3 = every third frame (20 FPS — recommended if rendering is slow).
-RENDER_EVERY = 3
+RENDER_EVERY = 1
 
 # Keypoint indices
 NOSE = 0
