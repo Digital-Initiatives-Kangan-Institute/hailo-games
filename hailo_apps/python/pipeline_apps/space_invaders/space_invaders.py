@@ -43,7 +43,15 @@ MIRROR_X = True
 
 # Frame delay (seconds) — small sleep to avoid maxing out CPU.
 # 0.033 = ~30 FPS cap, 0.016 = ~60 FPS cap, 0.0 = no delay.
-FRAME_DELAY = 0.033
+FRAME_DELAY = 0.0
+
+# Render every Nth frame. Pose extraction runs on every frame,
+# but heavy rendering only runs every RENDER_EVERY frames.
+# This decouples game logic from the GStreamer pipeline so the
+# callback returns quickly and avoids pipeline backpressure lag.
+# 1 = render every frame (60 FPS target), 2 = every other frame (30 FPS),
+# 3 = every third frame (20 FPS — recommended if rendering is slow).
+RENDER_EVERY = 3
 
 # Keypoint indices
 NOSE = 0
@@ -226,6 +234,9 @@ class SpaceInvadersCallback(app_callback_class):
         self._render_buffer = None
         self._render_buffer_shape = None
 
+        # Frame counter for render-skipping (decouples render cost from pipeline rate)
+        self._frame_counter = 0
+
     def set_frame(self, frame):
         """Override to drain stale frames so display always shows the latest."""
         while not self.frame_queue.empty():
@@ -291,6 +302,9 @@ def app_callback(element, buffer, user_data):
         return Gst.FlowReturn.OK
 
     now = time.time()
+
+    # Increment frame counter for render-skipping
+    user_data._frame_counter += 1
 
     # Lazy init game clock
     if user_data.game_start is None:
@@ -470,6 +484,15 @@ def app_callback(element, buffer, user_data):
     # Cleanup dead objects
     user_data.bullets = [b for b in user_data.bullets if b.alive]
     user_data.alien_bullets = [b for b in user_data.alien_bullets if b.alive]
+
+    # --- Frame-skip: only render every RENDER_EVERY frames ---
+    # This is the key optimisation: the callback does the cheap pose
+    # extraction and game-state update on every frame, but only does
+    # the expensive rendering (and set_frame) every Nth frame. This
+    # stops the GStreamer pipeline from backing up when rendering is
+    # slow, which was causing the 5-second input lag.
+    if RENDER_EVERY > 1 and (user_data._frame_counter % RENDER_EVERY) != 0:
+        return Gst.FlowReturn.OK
 
     # --- Render ---
     output = _render_frame(user_data, width, height, now)
