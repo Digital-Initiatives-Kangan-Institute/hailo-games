@@ -239,23 +239,19 @@ def draw_pip(surf, pip_frame, keypoints, width, height, player_x, player_y):
     x0 = width - PIP_W - PIP_MARGIN
     y0 = height - PIP_H - PIP_MARGIN
 
+    # --- Check if ship is inside the PiP area ---
+    # If the ship is under the PiP, hide it entirely (no camera, no border).
+    ship_in_pip = (x0 <= player_x <= x0 + PIP_W and
+                   y0 <= player_y <= y0 + PIP_H)
+    if ship_in_pip:
+        return None
+
     # Convert numpy frame (H, W, 3) RGB → pygame Surface
     # pygame.surfarray.make_surface expects (W, H, 3) layout
     pip_surf = pygame.surfarray.make_surface(pip_frame.swapaxes(0, 1))
     pip_surf = pygame.transform.scale(pip_surf, (PIP_W, PIP_H))
     # Flip horizontally so the camera view matches a mirror (natural feel)
     pip_surf = pygame.transform.flip(pip_surf, True, False)
-
-    # --- Check if ship is inside the PiP area ---
-    ship_in_pip = (x0 <= player_x <= x0 + PIP_W and
-                   y0 <= player_y <= y0 + PIP_H)
-
-    # --- Apply fade to camera BEFORE drawing skeleton ---
-    if ship_in_pip:
-        # 25% opacity — darken the camera view
-        fade = pygame.Surface((PIP_W, PIP_H), pygame.SRCALPHA)
-        fade.fill((0, 0, 0, PIP_FADE_ALPHA))
-        pip_surf.blit(fade, (0, 0))
 
     # --- Draw skeleton ON TOP of the camera frame (on pip_surf, not surf) ---
     # This ensures the skeleton is visible above the camera image,
@@ -280,8 +276,7 @@ def draw_pip(surf, pip_frame, keypoints, width, height, player_x, player_y):
     surf.blit(pip_surf, (x0, y0))
 
     # Border
-    border_color = (200, 200, 200) if not ship_in_pip else (255, 100, 100)
-    pygame.draw.rect(surf, border_color, (x0 - 2, y0 - 2, PIP_W + 4, PIP_H + 4), 2)
+    pygame.draw.rect(surf, (200, 200, 200), (x0 - 2, y0 - 2, PIP_W + 4, PIP_H + 4), 2)
 
     # Label
     font_small = pygame.font.Font(None, 18)
