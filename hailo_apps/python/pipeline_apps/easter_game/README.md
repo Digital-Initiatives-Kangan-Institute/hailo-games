@@ -2,7 +2,11 @@
 
 ![Easter Game Example](../../../../doc/images/easter_game.gif)
 
-An interactive Easter Egg and Afikoman catching game using Hailo pose estimation.
+Catch Easter eggs and Afikoman matzahs with your hands for points.
+
+## Description
+
+An interactive Easter Egg and Afikoman catching game using Hailo pose estimation. A custom background is displayed with items appearing one at a time. Catch Easter eggs (20 pts) and Afikoman matzahs (10 pts) by moving your hands to them. Items despawn after 3 seconds. Features a leaderboard with auto-named players, 90-second countdown timer, and auto-restart.
 
 ## How It Works
 
@@ -16,40 +20,25 @@ An interactive Easter Egg and Afikoman catching game using Hailo pose estimation
 - 90-second countdown timer at the top
 - Game over screen shows final scores, then auto-restarts
 
+## Controls
+
+| Gesture | Action |
+|---------|--------|
+| Move hands to item | Catch it |
+
+## Requirements
+
+- Hailo-8/8L/10H accelerator
+- USB webcam or Raspberry Pi camera
+- Pose estimation model (auto-downloaded)
+
 ## Usage
 
 ```bash
 python3 easter_game.py --input usb
-
-or:
-
-python3 easter_game.py --input usb --background /path/to/background.png
 ```
 
-## Controls
-
-- Move your hands to catch eggs and Afikoman
-- Leaderboard and scores are displayed on screen
-- Game ends after 90 seconds, shows final scores, and restarts automatically
-
-## This app was autonomously generated using the HL App Builder custom agent with the following prompt:
-
-Build Easter game:
-
-Easter eggs (colorful ovals, 20 pts) and Afikoman matzahs (golden rectangles, 10 pts) appear one at a time at random spots. 
-
-Players catch them with their hands. 
-
-Missed after 3 seconds - next one spawns. 
-
-Eggs appear more often than Afikoman.
-
-Background: /home/michaelf/room.png. 
-
-Leaderboard on the right - auto-name new players. 
-
-Show "+20"/"+10" pop-ups on catch.
-
-90-second countdown timer at top. 
-
-Game over - show final scores, then auto-restart.
+Optionally pass a custom background:
+```bash
+python3 easter_game.py --input usb --background /path/to/background.png
+```

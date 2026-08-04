@@ -36,6 +36,11 @@ AFIKOMAN_POINTS = 10
 POPUP_DURATION = 0.8        # seconds the "+N" text floats
 RESTART_DELAY = 5           # seconds to show final scores before restart
 
+# PiP constants
+PIP_W = 240
+PIP_H = 135
+PIP_MARGIN = 12
+
 # Wrist keypoint indices (COCO 17-keypoint model)
 LEFT_WRIST = 9
 RIGHT_WRIST = 10
@@ -189,6 +194,9 @@ class EasterGameCallback(app_callback_class):
         self.fw = 0
         self.fh = 0
 
+        # PiP camera preview
+        self.pip_frame = None
+
     # --- helpers ---
     def set_frame(self, frame):
         """Override to drain stale frames so display always shows the latest."""
@@ -256,6 +264,9 @@ def app_callback(element, buffer, user_data):
         return Gst.FlowReturn.OK
 
     now = time.time()
+
+    # Save raw frame for PiP before any rendering
+    user_data.pip_frame = cv2.flip(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), 1)
 
     # Lazy init game clock
     if user_data.game_start is None:
@@ -394,6 +405,19 @@ def app_callback(element, buffer, user_data):
 
     # Leaderboard on right
     _draw_leaderboard(output, user_data.players, width, height)
+
+    # PiP camera preview
+    if user_data.pip_frame is not None:
+        ph, pw = user_data.pip_frame.shape[:2]
+        if pw > 0 and ph > 0:
+            scale = min(PIP_W / pw, PIP_H / ph)
+            new_w, new_h = int(pw * scale), int(ph * scale)
+            resized = cv2.resize(user_data.pip_frame, (new_w, new_h))
+            x0 = width - new_w - PIP_MARGIN
+            y0 = height - new_h - PIP_MARGIN
+            cv2.rectangle(output, (x0 - 2, y0 - 2), (x0 + new_w + 2, y0 + new_h + 2), (200, 200, 200), 2)
+            cv2.putText(output, "CAM", (x0 + 4, y0 + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+            output[y0:y0 + new_h, x0:x0 + new_w] = resized
 
     # Convert RGB → BGR for set_frame
     output = cv2.cvtColor(output, cv2.COLOR_RGB2BGR)

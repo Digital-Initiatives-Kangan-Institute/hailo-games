@@ -337,6 +337,36 @@ def draw_leg_skeleton(output, leg_pos, w, h, kick_cd, ball_sx, ball_sy):
         cv2.circle(output, (fx, fy), 11, WHITE, 2)
 
 
+# ─── PiP camera preview ──────────────────────────────────────────────────────
+PIP_W = 240
+PIP_H = 135
+PIP_MARGIN = 12
+
+def draw_pip(output, pip_frame, w, h):
+    """Overlay a small camera preview in the bottom-right corner."""
+    if pip_frame is None:
+        return
+    ph, pw = pip_frame.shape[:2]
+    if pw == 0 or ph == 0:
+        return
+    # Scale to PIP size
+    scale = min(PIP_W / pw, PIP_H / ph)
+    new_w = int(pw * scale)
+    new_h = int(ph * scale)
+    resized = cv2.resize(pip_frame, (new_w, new_h))
+
+    # Position bottom-right
+    x0 = w - new_w - PIP_MARGIN
+    y0 = h - new_h - PIP_MARGIN
+
+    # Border
+    cv2.rectangle(output, (x0 - 2, y0 - 2), (x0 + new_w + 2, y0 + new_h + 2), (200, 200, 200), 2)
+    # Label
+    cv2.putText(output, "CAM", (x0 + 4, y0 + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+    # Overlay the camera frame
+    output[y0:y0 + new_h, x0:x0 + new_w] = resized
+
+
 def draw_hud(output, score, attempts, state, w, h):
     """Draw score and state banners."""
     # Score panel
@@ -375,6 +405,7 @@ class SoccerCallback(app_callback_class):
         super().__init__()
         self.use_frame = True
         self.leg_queue = queue.Queue(maxsize=4)
+        self.pip_frame = None  # raw camera frame for PiP
 
     def set_frame(self, frame):
         while not self.frame_queue.empty():
@@ -400,6 +431,9 @@ def app_callback(element, buffer, user_data):
 
     if frame is None:
         return Gst.FlowReturn.OK
+
+    # Save raw frame for PiP before any rendering
+    user_data.pip_frame = cv2.flip(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), 1)
 
     # Extract leg keypoints
     roi = hailo.get_roi_from_buffer(buffer)
@@ -546,6 +580,7 @@ def app_callback(element, buffer, user_data):
     bsx, bsy = (bp[0], bp[1]) if bp else (width // 2, int(height * 0.85))
     draw_leg_skeleton(output, leg_pos, width, height, user_data.kick_cd, bsx, bsy)
     draw_hud(output, user_data.score, user_data.attempts, user_data.state, width, height)
+    draw_pip(output, user_data.pip_frame, width, height)
 
     output = cv2.cvtColor(output, cv2.COLOR_RGB2BGR)
     user_data.set_frame(output)

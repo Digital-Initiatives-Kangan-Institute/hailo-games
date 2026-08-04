@@ -214,6 +214,9 @@ class SpaceInvadersCallback(app_callback_class):
         self.fw = 0
         self.fh = 0
 
+        # PiP camera preview
+        self.pip_frame = None
+
     def set_frame(self, frame):
         """Override to drain stale frames so display always shows the latest."""
         while not self.frame_queue.empty():
@@ -279,6 +282,9 @@ def app_callback(element, buffer, user_data):
         return Gst.FlowReturn.OK
 
     now = time.time()
+
+    # Save raw frame for PiP before any rendering
+    user_data.pip_frame = cv2.flip(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), 1)
 
     # Lazy init game clock
     if user_data.game_start is None:
@@ -512,6 +518,19 @@ def _render_frame(user_data, width, height, now):
     # HUD
     remaining = max(0.0, GAME_DURATION - (now - user_data.game_start))
     _draw_hud(output, user_data.score, user_data.lives, remaining, width)
+
+    # PiP camera preview
+    if user_data.pip_frame is not None:
+        ph, pw = user_data.pip_frame.shape[:2]
+        if pw > 0 and ph > 0:
+            scale = min(PIP_W / pw, PIP_H / ph)
+            new_w, new_h = int(pw * scale), int(ph * scale)
+            resized = cv2.resize(user_data.pip_frame, (new_w, new_h))
+            x0 = width - new_w - PIP_MARGIN
+            y0 = height - new_h - PIP_MARGIN
+            cv2.rectangle(output, (x0 - 2, y0 - 2), (x0 + new_w + 2, y0 + new_h + 2), (200, 200, 200), 2)
+            cv2.putText(output, "CAM", (x0 + 4, y0 + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+            output[y0:y0 + new_h, x0:x0 + new_w] = resized
 
     return output
 

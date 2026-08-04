@@ -52,6 +52,11 @@ LIMB_COLORS = [l[3] for l in LIMBS]
 LIMB_SHORTS = [l[1] for l in LIMBS]
 NUM_COLUMNS = 4
 
+# --- PiP constants ---
+PIP_W = 240
+PIP_H = 135
+PIP_MARGIN = 12
+
 # --- Game constants ---
 GAME_DURATION = 90          # seconds
 NODE_BASE_SPEED = 4.0
@@ -124,6 +129,7 @@ class DDRCallback(app_callback_class):
         super().__init__()
         self.use_frame = True
         self.limb_x = [None] * len(LIMBS)
+        self.pip_frame = None  # raw camera frame for PiP
 
     def set_frame(self, frame):
         while not self.frame_queue.empty():
@@ -147,6 +153,9 @@ def app_callback(element, buffer, user_data):
 
     if frame is None:
         return Gst.FlowReturn.OK
+
+    # Save raw frame for PiP before any rendering
+    user_data.pip_frame = cv2.flip(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), 1)
 
     # Extract limb positions
     roi = hailo.get_roi_from_buffer(buffer)
@@ -331,6 +340,19 @@ def app_callback(element, buffer, user_data):
     secs = int(remaining)
     timer_col = (80, 80, 255) if remaining < 10 else WHITE
     cv2.putText(output, f"{secs:02d}", (width - 60, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, timer_col, 2)
+
+    # PiP camera preview
+    if user_data.pip_frame is not None:
+        ph, pw = user_data.pip_frame.shape[:2]
+        if pw > 0 and ph > 0:
+            scale = min(PIP_W / pw, PIP_H / ph)
+            new_w, new_h = int(pw * scale), int(ph * scale)
+            resized = cv2.resize(user_data.pip_frame, (new_w, new_h))
+            x0 = width - new_w - PIP_MARGIN
+            y0 = height - new_h - PIP_MARGIN
+            cv2.rectangle(output, (x0 - 2, y0 - 2), (x0 + new_w + 2, y0 + new_h + 2), (200, 200, 200), 2)
+            cv2.putText(output, "CAM", (x0 + 4, y0 + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+            output[y0:y0 + new_h, x0:x0 + new_w] = resized
 
     output = cv2.cvtColor(output, cv2.COLOR_RGB2BGR)
     user_data.set_frame(output)

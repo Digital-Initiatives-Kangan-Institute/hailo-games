@@ -59,6 +59,11 @@ FRUIT_TYPES = [
 # Blade colours per hand (BGR)
 BLADE_COLORS = [(255, 210, 80), (55, 155, 255)]
 
+# PiP constants
+PIP_W = 240
+PIP_H = 135
+PIP_MARGIN = 12
+
 # Colours
 BLACK = (0, 0, 0)
 WHITE = (255, 255, 255)
@@ -274,6 +279,7 @@ class FruitNinjaCallback(app_callback_class):
         super().__init__()
         self.use_frame = True
         self.wrist_queues = [deque(maxlen=TRAIL_LEN) for _ in range(2)]
+        self.pip_frame = None  # raw camera frame for PiP
 
     def set_frame(self, frame):
         while not self.frame_queue.empty():
@@ -297,6 +303,9 @@ def app_callback(element, buffer, user_data):
 
     if frame is None:
         return Gst.FlowReturn.OK
+
+    # Save raw frame for PiP before any rendering
+    user_data.pip_frame = cv2.flip(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), 1)
 
     # Extract wrist positions
     roi = hailo.get_roi_from_buffer(buffer)
@@ -478,6 +487,19 @@ def app_callback(element, buffer, user_data):
     if user_data.bomb_timeout > 0:
         secs_left = math.ceil(user_data.bomb_timeout / 60)
         cv2.putText(output, f"FROZEN {secs_left}s", (width // 2 - 60, height // 2), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (30, 80, 255), 3)
+
+    # PiP camera preview
+    if user_data.pip_frame is not None:
+        ph, pw = user_data.pip_frame.shape[:2]
+        if pw > 0 and ph > 0:
+            scale = min(PIP_W / pw, PIP_H / ph)
+            new_w, new_h = int(pw * scale), int(ph * scale)
+            resized = cv2.resize(user_data.pip_frame, (new_w, new_h))
+            x0 = width - new_w - PIP_MARGIN
+            y0 = height - new_h - PIP_MARGIN
+            cv2.rectangle(output, (x0 - 2, y0 - 2), (x0 + new_w + 2, y0 + new_h + 2), (200, 200, 200), 2)
+            cv2.putText(output, "CAM", (x0 + 4, y0 + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+            output[y0:y0 + new_h, x0:x0 + new_w] = resized
 
     output = cv2.cvtColor(output, cv2.COLOR_RGB2BGR)
     user_data.set_frame(output)
