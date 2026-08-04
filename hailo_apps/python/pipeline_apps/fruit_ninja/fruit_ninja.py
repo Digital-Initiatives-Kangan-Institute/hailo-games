@@ -47,6 +47,12 @@ SLICE_RADIUS_MULT = 2.0
 BOMB_TIMEOUT_FRAMES = 180
 COMBO_WINDOW = 35
 COMBO_BONUS = 5
+
+# Render every Nth frame. Pose extraction runs on every frame,
+# but heavy rendering only runs every RENDER_EVERY frames.
+# 1 = render every frame (60 FPS), 2 = every other (30 FPS),
+# 3 = every third (20 FPS).
+RENDER_EVERY = 1
 PARTICLE_COUNT = 14
 
 # Fruit definitions: (name, body_colour BGR, highlight, radius, points)
@@ -280,6 +286,8 @@ class FruitNinjaCallback(app_callback_class):
         # Pre-allocated render buffer
         self._render_buffer = None
         self._render_buffer_shape = None
+        # Frame counter for render-skipping
+        self._frame_counter = 0
 
     def set_frame(self, frame):
         while not self.frame_queue.empty():
@@ -303,6 +311,9 @@ def app_callback(element, buffer, user_data):
 
     if frame is None:
         return Gst.FlowReturn.OK
+
+    # Increment frame counter for render-skipping
+    user_data._frame_counter += 1
 
     # Extract wrist positions
     roi = hailo.get_roi_from_buffer(buffer)
@@ -459,6 +470,13 @@ def app_callback(element, buffer, user_data):
                 user_data.bomb_timeout = BOMB_TIMEOUT_FRAMES
                 user_data.popups.append(make_popup(bomb['x'], bomb['y'] - 22, "TIMEOUT!", (30, 80, 255)))
                 break
+
+    # --- Frame-skip: only render every RENDER_EVERY frames ---
+    # Cheap game-state update runs every frame; expensive rendering
+    # only runs every Nth frame to stop the GStreamer pipeline
+    # from backing up (which causes input lag).
+    if RENDER_EVERY > 1 and (user_data._frame_counter % RENDER_EVERY) != 0:
+        return Gst.FlowReturn.OK
 
     # --- Render ---
     if (user_data._render_buffer is None or
