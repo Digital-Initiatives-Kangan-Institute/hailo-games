@@ -79,6 +79,21 @@ ALIEN_COLORS = [
     (60, 180, 255),   # blue (bottom)
 ]
 
+# PiP camera preview
+PIP_W = 240
+PIP_H = 135
+PIP_MARGIN = 16
+PIP_FADE_ALPHA = 64   # 25% of 255 — applied when ship overlaps PiP
+PIP_UPDATE_INTERVAL = 0.1  # Update PiP 10×/sec (faster than camera frame rate)
+
+# COCO 17 skeleton connections for PiP overlay
+COCO_SKELETON = [
+    (0, 1), (0, 2), (1, 3), (2, 4),       # head
+    (5, 7), (7, 9), (6, 8), (8, 10),       # arms
+    (5, 6), (5, 11), (6, 12), (11, 12),    # torso
+    (11, 13), (13, 15), (12, 14), (14, 16) # legs
+]
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Game objects
@@ -206,6 +221,74 @@ def draw_hud(surf, score, lives, remaining, width):
         pygame.draw.polygon(surf, GREEN, pts)
 
 
+def draw_pip(surf, pip_frame, keypoints, width, height, player_x, player_y):
+    """Draw a Picture-in-Picture camera preview in the bottom-right corner
+    with the pose skeleton overlay. If the player ship is inside the PiP
+    area, fade the camera to 25% opacity.
+
+    Returns the (x, y, w, h) rect of the PiP area, or None if no frame.
+    """
+    if pip_frame is None:
+        return None
+
+    pip_h, pip_w = pip_frame.shape[:2]
+    if pip_w == 0 or pip_h == 0:
+        return None
+
+    # Position bottom-right
+    x0 = width - PIP_W - PIP_MARGIN
+    y0 = height - PIP_H - PIP_MARGIN
+
+    # Convert numpy frame (H, W, 3) RGB → pygame Surface
+    # pygame.surfarray.make_surface expects (W, H, 3) layout
+    pip_surf = pygame.surfarray.make_surface(pip_frame.swapaxes(0, 1))
+    pip_surf = pygame.transform.scale(pip_surf, (PIP_W, PIP_H))
+
+    # Draw skeleton on the PiP (if keypoints available)
+    # Keypoints are normalised to bbox — scale to PiP dimensions
+    if keypoints:
+        # Use all 17 keypoints, already in 0-1 bbox space
+        kp_pixels = [(int(x * PIP_W), int(y * PIP_H)) for x, y in keypoints]
+
+        # Draw skeleton lines (green)
+        for a, b in COCO_SKELETON:
+            if a < len(kp_pixels) and b < len(kp_pixels):
+                pygame.draw.line(surf, (0, 255, 0),
+                                 (x0 + kp_pixels[a][0], y0 + kp_pixels[a][1]),
+                                 (x0 + kp_pixels[b][0], y0 + kp_pixels[b][1]), 1)
+
+        # Draw keypoint dots (wrists highlighted in yellow)
+        for i, (px, py) in enumerate(kp_pixels):
+            color = (0, 255, 255) if i in (LEFT_WRIST, RIGHT_WRIST) else (0, 220, 0)
+            radius = 4 if i in (LEFT_WRIST, RIGHT_WRIST) else 2
+            pygame.draw.circle(surf, color, (x0 + px, y0 + py), radius)
+
+    # --- Check if ship is inside the PiP area ---
+    ship_in_pip = (x0 <= player_x <= x0 + PIP_W and
+                   y0 <= player_y <= y0 + PIP_H)
+
+    # --- Apply fade if ship overlaps ---
+    if ship_in_pip:
+        # 25% opacity — darken the camera view
+        fade = pygame.Surface((PIP_W, PIP_H), pygame.SRCALPHA)
+        fade.fill((0, 0, 0, PIP_FADE_ALPHA))
+        pip_surf.blit(fade, (0, 0))
+
+    # Blit the PiP to the main surface
+    surf.blit(pip_surf, (x0, y0))
+
+    # Border
+    border_color = (200, 200, 200) if not ship_in_pip else (255, 100, 100)
+    pygame.draw.rect(surf, border_color, (x0 - 2, y0 - 2, PIP_W + 4, PIP_H + 4), 2)
+
+    # Label
+    font_small = pygame.font.Font(None, 18)
+    label = font_small.render("CAM", True, (200, 200, 200))
+    surf.blit(label, (x0 + 4, y0 + 2))
+
+    return (x0, y0, PIP_W, PIP_H)
+
+
 def draw_game_over(surf, score, width, height):
     # Dark overlay
     overlay = pygame.Surface((width, height), pygame.SRCALPHA)
@@ -230,22 +313,54 @@ def draw_game_over(surf, score, width, height):
 # Thread-safe shared state between camera and game threads
 # ═══════════════════════════════════════════════════════════════════════════
 class SharedState:
-    """Thread-safe container for data shared between camera and game threads."""
+    """Thread-safe container for data shared between camera and game threads.
+
+    Holds:
+      - Latest raw camera frame (for PiP display)
+      - Head position + hands-up gesture (for game logic)
+      - All 17 COCO keypoints (for PiP skeleton overlay)
+    """
 
     def __init__(self):
+        # Frame lock — protects the raw camera frame
+        self._frame_lock = threading.Lock()
+        self._frame = None       # RGB numpy array (H, W, 3) or None
+        self._frame_w = 0
+        self._frame_h = 0
+
+        # Pose lock — protects pose data + keypoints
         self._pose_lock = threading.Lock()
         self._head_x_norm = None
         self._both_hands_up = False
+        self._keypoints = []     # list of (x_norm, y_norm) tuples for all 17 keypoints
+
         self.running = True
 
-    def set_pose(self, head_x_norm, both_hands_up):
+    def set_frame(self, frame, width, height):
+        """Camera thread: store latest raw frame."""
+        with self._frame_lock:
+            self._frame = frame
+            self._frame_w = width
+            self._frame_h = height
+
+    def get_frame(self):
+        """Game thread: get a copy of the latest frame, or None."""
+        with self._frame_lock:
+            if self._frame is None:
+                return None, 0, 0
+            return self._frame.copy(), self._frame_w, self._frame_h
+
+    def set_pose(self, head_x_norm, both_hands_up, keypoints):
+        """Camera thread: store latest pose data + all keypoints."""
         with self._pose_lock:
             self._head_x_norm = head_x_norm
             self._both_hands_up = both_hands_up
+            self._keypoints = keypoints
 
     def get_pose(self):
+        """Game thread: get latest pose data + keypoints."""
         with self._pose_lock:
-            return self._head_x_norm, self._both_hands_up
+            return self._head_x_norm, self._both_hands_up, list(self._keypoints)
 
     def stop(self):
         self.running = False
@@ -315,7 +430,7 @@ class GameState:
 # Fast: only extracts pose data. No rendering.
 # ═══════════════════════════════════════════════════════════════════════════
 def camera_callback(element, buffer, user_data):
-    """Camera thread: extract pose data and store in SharedState."""
+    """Camera thread: extract pose data and raw frame, store in SharedState."""
     shared = user_data.shared
     pad = element.get_static_pad("src")
     fmt, width, height = get_caps_from_pad(pad)
@@ -323,12 +438,22 @@ def camera_callback(element, buffer, user_data):
     if not fmt or width is None or height is None:
         return Gst.FlowReturn.OK
 
+    # --- Extract raw frame (for PiP display) ---
+    try:
+        frame = get_numpy_from_buffer(buffer, fmt, width, height)
+        if frame is not None:
+            shared.set_frame(frame, width, height)
+    except Exception:
+        pass  # Non-fatal — PiP just won't show this frame
+
+    # --- Extract pose data ---
     try:
         roi = hailo.get_roi_from_buffer(buffer)
         detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
 
         head_x_norm = None
         both_hands_up = False
+        all_keypoints = []  # All 17 keypoints, normalised to bbox
 
         for det in detections:
             if det.get_label() != "person":
@@ -341,19 +466,28 @@ def camera_callback(element, buffer, user_data):
             if len(points) <= RIGHT_WRIST:
                 continue
 
+            # All 17 keypoints (normalised to bbox 0-1)
+            all_keypoints = [
+                (pt.x() * bbox.width() + bbox.xmin(),
+                 pt.y() * bbox.height() + bbox.ymin())
+                for pt in points
+            ]
+
+            # Head position (after mirroring for game logic)
             nose = points[NOSE]
             head_x_norm = nose.x() * bbox.width() + bbox.xmin()
             if MIRROR_X:
                 head_x_norm = 1.0 - head_x_norm
             nose_y = (nose.y() * bbox.height() + bbox.ymin()) * height
 
+            # Hands-up gesture
             lw_y = (points[LEFT_WRIST].y() * bbox.height() + bbox.ymin()) * height
             rw_y = (points[RIGHT_WRIST].y() * bbox.height() + bbox.ymin()) * height
             if lw_y < nose_y and rw_y < nose_y:
                 both_hands_up = True
             break
 
-        shared.set_pose(head_x_norm, both_hands_up)
+        shared.set_pose(head_x_norm, both_hands_up, all_keypoints)
     except Exception as e:
         logger.debug("Pose extraction error: %s", e)
 
@@ -436,7 +570,7 @@ def main():
         now = time.time()
 
         # --- Read pose from camera thread ---
-        head_x_norm, both_hands_up = user_data.shared.get_pose()
+        head_x_norm, both_hands_up, keypoints = user_data.shared.get_pose()
 
         # --- Lazy init ---
         if not game._init_done:
@@ -462,6 +596,10 @@ def main():
             draw_player_ship(screen, game.player_x, game.player_y)
             remaining = max(0.0, GAME_DURATION - (now - game.game_start)) if game.game_start else 0
             draw_hud(screen, game.score, game.lives, remaining, win_w)
+            # PiP stays visible during game over
+            if hasattr(game, '_cached_pip_frame') and game._cached_pip_frame is not None:
+                draw_pip(screen, game._cached_pip_frame, game._cached_keypoints,
+                         win_w, win_h, game.player_x, game.player_y)
             draw_game_over(screen, game.score, win_w, win_h)
             pygame.display.flip()
             clock.tick(FPS)
@@ -596,6 +734,19 @@ def main():
             screen.blit(text, (int(p.x) - 25, p.current_y()))
 
         draw_hud(screen, game.score, game.lives, remaining, win_w)
+
+        # --- PiP camera preview (drawn last, on top) ---
+        # Throttle: only get a new frame every PIP_UPDATE_INTERVAL seconds
+        if not hasattr(game, '_last_pip_time') or (now - game._last_pip_time) >= PIP_UPDATE_INTERVAL:
+            game._last_pip_time = now
+            pip_frame, _, _ = user_data.shared.get_frame()
+            game._cached_pip_frame = pip_frame
+            game._cached_keypoints = keypoints
+        # Draw using cached data
+        if hasattr(game, '_cached_pip_frame') and game._cached_pip_frame is not None:
+            draw_pip(screen, game._cached_pip_frame, game._cached_keypoints,
+                     win_w, win_h, game.player_x, game.player_y)
+
         pygame.display.flip()
         clock.tick(FPS)
 
