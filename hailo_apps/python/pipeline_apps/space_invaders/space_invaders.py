@@ -1,9 +1,8 @@
 """Space Invaders — steer with your head, raise hands to fire, defend Earth from aliens.
 
 Architecture:
-  - Camera thread (GStreamer callback): extracts pose data, stores in SharedState.
-  - Game thread (main): reads pose from SharedState, runs game loop at fixed FPS,
-    renders, and pushes the output frame to the display.
+  - Camera thread (GStreamer daemon thread): extracts pose data, stores in SharedState.
+  - Main thread: pygame main loop at fixed 60 FPS, reads pose, renders, displays.
   - SharedState uses threading.Lock to protect the image frame and pose data
     for safe cross-thread access.
 """
@@ -12,13 +11,15 @@ import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst
 
-import cv2
 import hailo
 import math
-import numpy as np
+import os
 import random
+import sys
 import threading
 import time
+
+import pygame
 
 from hailo_apps.python.core.common.buffer_utils import (
     get_caps_from_pad,
@@ -46,29 +47,37 @@ ALIEN_SPACING_X = 70
 ALIEN_SPACING_Y = 55
 ALIEN_DESCENT = 30
 ALIEN_SPEED_BASE = 1.5
-BULLET_SPEED = 18
+BULLET_SPEED = 10
 FIRE_COOLDOWN = 0.25
 FIRE_COOLDOWN_HANDS_UP = 0.12
 INITIAL_LIVES = 3
 ALIEN_SHOOT_CHANCE = 0.02
 ALIEN_POINTS = [40, 30, 20, 10]
-ALIEN_COLORS = [
-    (255, 60, 60), (255, 160, 40), (60, 220, 60), (60, 180, 255),
-]
 NUM_STARS = 80
 RESTART_DELAY = 5
-GAME_FPS = 60
+FPS = 60
 
 # --- Tunables ---
 MIRROR_X = True
 
-# --- Colours (BGR) ---
-BGR_BLACK = (0, 0, 0)
-BGR_DARK_BG = (8, 8, 24)
-BGR_WHITE = (255, 255, 255)
-BGR_GREEN = (0, 220, 0)
-BGR_RED = (60, 60, 255)
-BGR_HUD_BG = (30, 30, 30)
+# --- Colours (RGB) ---
+BLACK = (0, 0, 0)
+DARK_BG = (8, 8, 24)
+WHITE = (255, 255, 255)
+GREEN = (0, 220, 0)
+RED = (220, 30, 30)
+YELLOW = (255, 230, 0)
+BLUE = (60, 180, 255)
+ORANGE = (255, 160, 40)
+HUD_BG = (30, 30, 30)
+GREY = (120, 120, 140)
+
+ALIEN_COLORS = [
+    (255, 60, 60),    # red (top)
+    (255, 160, 40),   # orange
+    (60, 220, 60),    # green
+    (60, 180, 255),   # blue (bottom)
+]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -114,124 +123,127 @@ class Popup:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Drawing helpers
+# Drawing helpers (pygame)
 # ═══════════════════════════════════════════════════════════════════════════
-def draw_alien(output, alien):
+def draw_alien(surf, alien):
     x, y = int(alien.x), int(alien.y)
     size = 18
     color = alien.color
-    body_pts = np.array([
-        [x - size, y - size // 2], [x + size, y - size // 2],
-        [x + size, y + size // 2], [x - size, y + size // 2],
-    ], np.int32)
-    cv2.fillPoly(output, [body_pts], color, lineType=cv2.LINE_AA)
-    cv2.circle(output, (x - 7, y - 3), 4, BGR_BLACK, -1, cv2.LINE_AA)
-    cv2.circle(output, (x + 7, y - 3), 4, BGR_BLACK, -1, cv2.LINE_AA)
-    cv2.circle(output, (x - 6, y - 4), 1, BGR_WHITE, -1, cv2.LINE_AA)
-    cv2.circle(output, (x + 8, y - 4), 1, BGR_WHITE, -1, cv2.LINE_AA)
+
+    # Body
+    body = pygame.Rect(x - size, y - size // 2, size * 2, size)
+    pygame.draw.rect(surf, color, body)
+    pygame.draw.rect(surf, WHITE, body, 1)
+
+    # Eyes
+    pygame.draw.circle(surf, RED, (x - 7, y - 3), 4)
+    pygame.draw.circle(surf, RED, (x + 7, y - 3), 4)
+
+    # Antennae (animated)
     anim = 4 if alien.frame % 2 == 0 else -4
-    cv2.line(output, (x - 8, y - size // 2), (x - 14, y - size // 2 - 8 + anim), color, 2, cv2.LINE_AA)
-    cv2.line(output, (x + 8, y - size // 2), (x + 14, y - size // 2 - 8 + anim), color, 2, cv2.LINE_AA)
+    pygame.draw.line(surf, color, (x - 8, y - size // 2), (x - 14, y - size // 2 - 8 + anim), 2)
+    pygame.draw.line(surf, color, (x + 8, y - size // 2), (x + 14, y - size // 2 - 8 + anim), 2)
+
+    # Legs (alternating)
     if alien.frame % 2 == 0:
-        cv2.line(output, (x - 10, y + size // 2), (x - 14, y + size // 2 + 8), color, 2, cv2.LINE_AA)
-        cv2.line(output, (x + 10, y + size // 2), (x + 14, y + size // 2 + 8), color, 2, cv2.LINE_AA)
+        pygame.draw.line(surf, color, (x - 10, y + size // 2), (x - 14, y + size // 2 + 8), 2)
+        pygame.draw.line(surf, color, (x + 10, y + size // 2), (x + 14, y + size // 2 + 8), 2)
     else:
-        cv2.line(output, (x - 10, y + size // 2), (x - 6, y + size // 2 + 8), color, 2, cv2.LINE_AA)
-        cv2.line(output, (x + 10, y + size // 2), (x + 6, y + size // 2 + 8), color, 2, cv2.LINE_AA)
-    cv2.polylines(output, [body_pts], True, BGR_WHITE, 1, cv2.LINE_AA)
+        pygame.draw.line(surf, color, (x - 10, y + size // 2), (x - 6, y + size // 2 + 8), 2)
+        pygame.draw.line(surf, color, (x + 10, y + size // 2), (x + 6, y + size // 2 + 8), 2)
 
 
-def draw_player_ship(output, x, y):
+def draw_player_ship(surf, x, y):
     x, y = int(x), int(y)
-    pts = np.array([[x, y - 22], [x - 18, y + 12], [x + 18, y + 12]], np.int32)
-    cv2.fillPoly(output, [pts + 2], (40, 120, 40), cv2.LINE_AA)
-    cv2.fillPoly(output, [pts], BGR_GREEN, cv2.LINE_AA)
-    cv2.polylines(output, [pts], True, (100, 255, 100), 2, cv2.LINE_AA)
-    cv2.circle(output, (x, y - 4), 5, (0, 255, 0), -1, cv2.LINE_AA)
-    cv2.circle(output, (x, y - 4), 5, (200, 255, 200), 1, cv2.LINE_AA)
+    # Triangle ship
+    points = [(x, y - 22), (x - 18, y + 12), (x + 18, y + 12)]
+    pygame.draw.polygon(surf, GREEN, points)
+    pygame.draw.polygon(surf, (100, 255, 100), points, 2)
+    # Cockpit
+    pygame.draw.circle(surf, (0, 255, 0), (x, y - 4), 5)
+    pygame.draw.circle(surf, (200, 255, 200), (x, y - 4), 5, 1)
 
 
-def draw_bullet(output, bullet):
+def draw_bullet(surf, bullet):
     x, y = int(bullet.x), int(bullet.y)
     if bullet.is_alien:
-        pts = np.array([[x, y - 6], [x + 3, y], [x, y + 6], [x - 3, y]], np.int32)
-        cv2.fillPoly(output, [pts], BGR_RED, cv2.LINE_AA)
-        cv2.polylines(output, [pts], True, (150, 150, 255), 1, cv2.LINE_AA)
+        # Red diamond
+        pts = [(x, y - 6), (x + 4, y), (x, y + 6), (x - 4, y)]
+        pygame.draw.polygon(surf, RED, pts)
+        pygame.draw.polygon(surf, (150, 150, 255), pts, 1)
     else:
-        cv2.line(output, (x, y - 6), (x, y + 6), BGR_GREEN, 3, cv2.LINE_AA)
-        cv2.line(output, (x, y - 6), (x, y + 6), (200, 255, 200), 1, cv2.LINE_AA)
+        # Green line
+        pygame.draw.line(surf, GREEN, (x, y - 7), (x, y + 7), 3)
+        pygame.draw.line(surf, (200, 255, 200), (x, y - 7), (x, y + 7), 1)
 
 
-def draw_hud(output, score, lives, remaining, width):
+def draw_hud(surf, score, lives, remaining, width):
     bar_h = 50
-    output[:bar_h, :, :] = BGR_HUD_BG
+    # Background bar
+    pygame.draw.rect(surf, HUD_BG, (0, 0, width, bar_h))
+
+    # Progress bar
     frac = max(0.0, min(1.0, remaining / GAME_DURATION))
     bar_w = int((width - 260) * frac)
     bar_color = (80, 220, 80) if remaining > 20 else (80, 80, 255)
-    cv2.rectangle(output, (130, 10), (130 + bar_w, 34), bar_color, -1, cv2.LINE_AA)
-    cv2.rectangle(output, (130, 10), (width - 130, 34), (180, 180, 180), 1, cv2.LINE_AA)
+    pygame.draw.rect(surf, bar_color, (130, 10, bar_w, 24))
+    pygame.draw.rect(surf, GREY, (130, 10, width - 260, 24), 1)
+
+    # Time text
     mins = int(remaining) // 60
     secs = int(remaining) % 60
-    cv2.putText(output, f"{mins}:{secs:02d}", (20, 33), cv2.FONT_HERSHEY_SIMPLEX, 0.9, BGR_WHITE, 2, cv2.LINE_AA)
-    cv2.putText(output, f"SCORE: {score}", (width - 200, 33), cv2.FONT_HERSHEY_SIMPLEX, 0.7, BGR_GREEN, 2, cv2.LINE_AA)
+    time_surf = pygame.font.Font(None, 36).render(f"{mins}:{secs:02d}", True, WHITE)
+    surf.blit(time_surf, (20, 10))
+
+    # Score
+    score_surf = pygame.font.Font(None, 28).render(f"SCORE: {score}", True, GREEN)
+    surf.blit(score_surf, (width - 180, 12))
+
+    # Lives
     for i in range(lives):
-        lx = width - 250 + i * 30
-        pts = np.array([[lx, 18], [lx - 8, 32], [lx + 8, 32]], np.int32)
-        cv2.fillPoly(output, [pts], BGR_GREEN, cv2.LINE_AA)
+        lx = width - 230 + i * 25
+        pts = [(lx, 20), (lx - 8, 32), (lx + 8, 32)]
+        pygame.draw.polygon(surf, GREEN, pts)
 
 
-def draw_game_over(output, score, width, height):
-    overlay = output.copy()
-    cv2.rectangle(overlay, (0, 0), (width, height), (10, 10, 30), -1)
-    cv2.addWeighted(overlay, 0.8, output, 0.2, 0, output)
-    cv2.putText(output, "GAME OVER", (width // 2 - 160, height // 4), cv2.FONT_HERSHEY_SIMPLEX, 1.8, (60, 220, 255), 4, cv2.LINE_AA)
-    cv2.putText(output, f"FINAL SCORE: {score}", (width // 2 - 140, height // 4 + 60), cv2.FONT_HERSHEY_SIMPLEX, 1.0, BGR_WHITE, 2, cv2.LINE_AA)
-    cv2.putText(output, "Restarting...", (width // 2 - 100, height - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (180, 180, 255), 2, cv2.LINE_AA)
+def draw_game_over(surf, score, width, height):
+    # Dark overlay
+    overlay = pygame.Surface((width, height), pygame.SRCALPHA)
+    overlay.fill((10, 10, 30, 200))
+    surf.blit(overlay, (0, 0))
+
+    big = pygame.font.Font(None, 80)
+    med = pygame.font.Font(None, 48)
+    small = pygame.font.Font(None, 32)
+
+    go = big.render("GAME OVER", True, (60, 220, 255))
+    surf.blit(go, go.get_rect(center=(width // 2, height // 4)))
+
+    sc = med.render(f"FINAL SCORE: {score}", True, WHITE)
+    surf.blit(sc, sc.get_rect(center=(width // 2, height // 4 + 70)))
+
+    rt = small.render("Restarting...", True, (180, 180, 255))
+    surf.blit(rt, rt.get_rect(center=(width // 2, height - 60)))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Thread-safe shared state between camera and game threads
 # ═══════════════════════════════════════════════════════════════════════════
 class SharedState:
-    """Thread-safe container for data shared between the camera and game threads."""
+    """Thread-safe container for data shared between camera and game threads."""
 
     def __init__(self):
-        # Protects the image frame
-        self._frame_lock = threading.Lock()
-        self._frame = None
-        self._width = 0
-        self._height = 0
-
-        # Protects pose data
         self._pose_lock = threading.Lock()
         self._head_x_norm = None
         self._both_hands_up = False
-
-        # Running flag (simple bool — atomic in CPython)
         self.running = True
 
-    def set_frame(self, frame, width, height):
-        """Camera thread: store latest frame (RGB numpy)."""
-        with self._frame_lock:
-            self._frame = frame
-            self._width = width
-            self._height = height
-
-    def get_frame(self):
-        """Game thread: get a copy of the latest frame, or None."""
-        with self._frame_lock:
-            if self._frame is None:
-                return None, 0, 0
-            return self._frame.copy(), self._width, self._height
-
     def set_pose(self, head_x_norm, both_hands_up):
-        """Camera thread: store latest pose data."""
         with self._pose_lock:
             self._head_x_norm = head_x_norm
             self._both_hands_up = both_hands_up
 
     def get_pose(self):
-        """Game thread: get latest pose data."""
         with self._pose_lock:
             return self._head_x_norm, self._both_hands_up
 
@@ -240,17 +252,17 @@ class SharedState:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Game state (game thread only — no lock needed)
+# Game state
 # ═══════════════════════════════════════════════════════════════════════════
 class GameState:
-    def __init__(self):
+    def __init__(self, width, height):
         self.score = 0
         self.lives = INITIAL_LIVES
         self.game_start = None
         self.game_over = False
         self.game_over_time = None
-        self.player_x = 0.0
-        self.player_y = 0.0
+        self.player_x = width / 2
+        self.player_y = height - 60
         self.aliens = []
         self.alien_direction = 1
         self.alien_anim_timer = 0.0
@@ -260,12 +272,11 @@ class GameState:
         self.last_fire_time = 0.0
         self.popups = []
         self.stars = []
-        self.fw = 1280
-        self.fh = 720
-        self._render_buffer = None
-        self._render_buffer_shape = None
+        self.fw = width
+        self.fh = height
+        self._init_done = False
 
-    def init_aliens(self):
+    def init_world(self):
         self.aliens = []
         total = ALIEN_COLS * ALIEN_SPACING_X
         start_x = (self.fw - total) // 2 + ALIEN_SPACING_X // 2
@@ -274,8 +285,6 @@ class GameState:
                 self.aliens.append(Alien(row, col,
                                           start_x + col * ALIEN_SPACING_X,
                                           80 + row * ALIEN_SPACING_Y))
-
-    def init_stars(self):
         self.stars = []
         for _ in range(NUM_STARS):
             self.stars.append((
@@ -284,6 +293,7 @@ class GameState:
                 random.randint(80, 220),
                 random.choice([1, 1, 1, 2]),
             ))
+        self._init_done = True
 
     def restart(self):
         self.score = 0
@@ -297,11 +307,12 @@ class GameState:
         self.popups = []
         self.alien_direction = 1
         self.last_fire_time = 0.0
+        self._init_done = False
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Camera callback — runs in GStreamer thread
-# Fast: only extracts pose data and stores it. No rendering.
+# Fast: only extracts pose data. No rendering.
 # ═══════════════════════════════════════════════════════════════════════════
 def camera_callback(element, buffer, user_data):
     """Camera thread: extract pose data and store in SharedState."""
@@ -309,16 +320,9 @@ def camera_callback(element, buffer, user_data):
     pad = element.get_static_pad("src")
     fmt, width, height = get_caps_from_pad(pad)
 
-    # Store raw frame (optional — game can use it if needed)
-    if user_data.use_frame and fmt and width and height:
-        try:
-            frame = get_numpy_from_buffer(buffer, fmt, width, height)
-            if frame is not None:
-                shared.set_frame(frame, width, height)
-        except Exception as e:
-            logger.debug("Frame extraction error: %s", e)
+    if not fmt or width is None or height is None:
+        return Gst.FlowReturn.OK
 
-    # Extract pose data
     try:
         roi = hailo.get_roi_from_buffer(buffer)
         detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
@@ -357,79 +361,182 @@ def camera_callback(element, buffer, user_data):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Game thread — independent fixed-FPS loop
+# Callback class — wraps SharedState
 # ═══════════════════════════════════════════════════════════════════════════
-def game_loop(user_data):
-    """Main game loop running at fixed FPS, independent of camera."""
-    game = GameState()
-    shared = user_data.shared
-    frame_dt = 1.0 / GAME_FPS
+class SpaceInvadersCallback(app_callback_class):
+    """Bridges the camera callback thread and the main game thread."""
 
-    logger.info("Game thread started (target %d FPS)", GAME_FPS)
+    def __init__(self):
+        super().__init__()
+        # use_frame is False — we don't need the GStreamer display process;
+        # pygame handles the display in the main thread.
+        self.use_frame = False
+        self.shared = SharedState()
 
-    while shared.running:
-        loop_start = time.perf_counter()
+    def stop(self):
+        self.shared.stop()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Main — pygame game loop
+# ═══════════════════════════════════════════════════════════════════════════
+def main():
+    parser = get_pipeline_parser()
+    args, _ = parser.parse_known_args()
+
+    # Init pygame
+    os.environ.setdefault("SDL_VIDEO_CENTERED", "1")
+    pygame.init()
+    pygame.display.set_caption("Space Invaders — Hailo Edition")
+
+    # Fullscreen display
+    info = pygame.display.Info()
+    win_w, win_h = info.current_w, info.current_h
+    if win_w < 640 or win_h < 480:
+        win_w, win_h = 1280, 720
+    screen = pygame.display.set_mode((win_w, win_h), pygame.FULLSCREEN)
+    clock = pygame.time.Clock()
+
+    # Shared state + game state
+    user_data = SpaceInvadersCallback()
+    game = GameState(win_w, win_h)
+
+    # Start GStreamer pipeline in a daemon thread
+    gst_app = GStreamerPoseEstimationApp(camera_callback, user_data, parser)
+    gst_thread = threading.Thread(
+        target=lambda: (gst_app.run(), user_data.shared.stop()),
+        daemon=True, name='CameraThread'
+    )
+    gst_thread.start()
+    # Give the pipeline a moment to start
+    time.sleep(1.0)
+
+    # Pre-rendered star surface for twinkling effect
+    def draw_stars(surf, game, now):
+        for sx, sy, brightness, size in game.stars:
+            twinkle = max(50, min(255, brightness + int(30 * math.sin(now * 2 + sx * 0.1))))
+            col = (twinkle, twinkle, twinkle)
+            if size == 1:
+                surf.set_at((sx, sy), col)
+            else:
+                pygame.draw.circle(surf, col, (sx, sy), size)
+
+    running = True
+    while running and user_data.shared.running:
+        # --- Events ---
+        for ev in pygame.event.get():
+            if ev.type == pygame.QUIT:
+                running = False
+            elif ev.type == pygame.KEYDOWN:
+                if ev.key == pygame.K_ESCAPE:
+                    running = False
+                elif ev.key == pygame.K_r:
+                    game.restart()
+
         now = time.time()
 
-        # Lazy init
-        if game.game_start is None:
+        # --- Read pose from camera thread ---
+        head_x_norm, both_hands_up = user_data.shared.get_pose()
+
+        # --- Lazy init ---
+        if not game._init_done:
             game.game_start = now
-            game.player_x = game.fw / 2
-            game.player_y = game.fh - 60
-            game.init_aliens()
-            game.init_stars()
+            game.init_world()
 
-        # Read pose from camera thread
-        head_x_norm, both_hands_up = shared.get_pose()
-
-        # Game over / restart
+        # --- Game over / restart ---
         if game.game_over:
             if game.game_over_time and (now - game.game_over_time) >= RESTART_DELAY:
                 game.restart()
+                clock.tick(FPS)
                 continue
-            render_frame(game, now, game_over=True, user_data=user_data)
-            _sleep_to_fps(loop_start, frame_dt)
+            # Render game over screen
+            screen.fill(DARK_BG)
+            draw_stars(screen, game, now)
+            for alien in game.aliens:
+                if alien.alive:
+                    draw_alien(screen, alien)
+            for b in game.bullets:
+                draw_bullet(screen, b)
+            for b in game.alien_bullets:
+                draw_bullet(screen, b)
+            draw_player_ship(screen, game.player_x, game.player_y)
+            remaining = max(0.0, GAME_DURATION - (now - game.game_start)) if game.game_start else 0
+            draw_hud(screen, game.score, game.lives, remaining, win_w)
+            draw_game_over(screen, game.score, win_w, win_h)
+            pygame.display.flip()
+            clock.tick(FPS)
             continue
 
-        # Time's up
+        # --- Time's up ---
         elapsed = now - game.game_start
         remaining = max(0.0, GAME_DURATION - elapsed)
         if remaining <= 0:
             game.game_over = True
             game.game_over_time = now
-            _sleep_to_fps(loop_start, frame_dt)
+            clock.tick(FPS)
             continue
 
-        # Respawn aliens
+        # --- Respawn aliens ---
         if not any(a.alive for a in game.aliens):
-            game.init_aliens()
+            game.init_world()
             game.alien_direction = 1
 
-        # Update ship from head
+        # --- Update ship from head ---
         if head_x_norm is not None:
-            target_x = np.clip(head_x_norm * game.fw, 40, game.fw - 40)
+            target_x = head_x_norm * win_w
+            target_x = max(40, min(win_w - 40, target_x))
             game.player_x += (target_x - game.player_x) * 0.25
 
-        # Fire
+        # --- Fire ---
         cooldown = FIRE_COOLDOWN_HANDS_UP if both_hands_up else FIRE_COOLDOWN
         if now - game.last_fire_time >= cooldown:
             game.bullets.append(Bullet(game.player_x, game.player_y - 22))
             game.last_fire_time = now
 
-        # Update aliens
-        _update_aliens(game, now)
+        # --- Update aliens ---
+        alive = [a for a in game.aliens if a.alive]
+        if alive:
+            if now - game.alien_anim_timer >= game.alien_anim_interval:
+                for a in alive:
+                    a.frame += 1
+                game.alien_anim_timer = now
 
-        # Update bullets
+            speed_mult = 1.0 + (1.0 - len(alive) / (ALIEN_ROWS * ALIEN_COLS)) * 2.0
+            speed = ALIEN_SPEED_BASE * speed_mult
+
+            hit_edge = any(
+                a.x + speed * game.alien_direction < 30 or
+                a.x + speed * game.alien_direction > win_w - 30
+                for a in alive
+            )
+
+            if hit_edge:
+                game.alien_direction *= -1
+                for a in alive:
+                    a.y += ALIEN_DESCENT
+                    if a.y >= game.player_y - 30:
+                        game.game_over = True
+                        game.game_over_time = now
+                        break
+            else:
+                for a in alive:
+                    a.x += speed * game.alien_direction
+
+            if not game.game_over and random.random() < ALIEN_SHOOT_CHANCE:
+                shooter = random.choice(alive)
+                game.alien_bullets.append(Bullet(shooter.x, shooter.y + 18, is_alien=True))
+
+        # --- Update bullets ---
         for b in game.bullets:
             b.y -= BULLET_SPEED
             if b.y < 0:
                 b.alive = False
         for b in game.alien_bullets:
             b.y += BULLET_SPEED * 0.6
-            if b.y > game.fh:
+            if b.y > win_h:
                 b.alive = False
 
-        # Collisions
+        # --- Collisions: player bullets vs aliens ---
         for b in game.bullets:
             if not b.alive:
                 continue
@@ -443,182 +550,64 @@ def game_loop(user_data):
                     game.popups.append(Popup(f"+{a.points}", a.x, a.y, a.color))
                     break
 
+        # --- Collisions: alien bullets vs player ---
         for b in game.alien_bullets:
             if not b.alive:
                 continue
             if math.hypot(b.x - game.player_x, b.y - game.player_y) < 20:
                 b.alive = False
                 game.lives -= 1
-                game.popups.append(Popup("-1 LIFE", game.player_x, game.player_y - 40, BGR_RED))
+                game.popups.append(Popup("-1 LIFE", game.player_x, game.player_y - 40, RED))
                 if game.lives <= 0:
                     game.game_over = True
-                    game.game_over_time = time.time()
+                    game.game_over_time = now
+                    break
 
-        # Cleanup
+        # --- Cleanup ---
         game.bullets = [b for b in game.bullets if b.alive]
         game.alien_bullets = [b for b in game.alien_bullets if b.alive]
 
-        # Render
-        render_frame(game, now, game_over=False, user_data=user_data)
+        # --- Render ---
+        screen.fill(DARK_BG)
+        draw_stars(screen, game, now)
 
-        # Maintain FPS
-        _sleep_to_fps(loop_start, frame_dt)
+        for alien in game.aliens:
+            if alien.alive:
+                draw_alien(screen, alien)
 
+        for b in game.bullets:
+            draw_bullet(screen, b)
+        for b in game.alien_bullets:
+            draw_bullet(screen, b)
 
-def _sleep_to_fps(loop_start, frame_dt):
-    elapsed = time.perf_counter() - loop_start
-    sleep_time = frame_dt - elapsed
-    if sleep_time > 0:
-        time.sleep(sleep_time)
+        draw_player_ship(screen, game.player_x, game.player_y)
 
+        # Ship tracking ring
+        if game.player_x > 0:
+            pygame.draw.circle(screen, (0, 80, 0),
+                               (int(game.player_x), int(game.player_y)), 30, 1)
 
-def _update_aliens(game, now):
-    alive = [a for a in game.aliens if a.alive]
-    if not alive:
-        return
-    if now - game.alien_anim_timer >= game.alien_anim_interval:
-        for a in alive:
-            a.frame += 1
-        game.alien_anim_timer = now
+        # Popups
+        game.popups = [p for p in game.popups if p.alive()]
+        for p in game.popups:
+            alpha = p.alpha()
+            color = tuple(int(c * alpha) for c in p.colour)
+            text = pygame.font.Font(None, 32).render(p.text, True, color)
+            screen.blit(text, (int(p.x) - 25, p.current_y()))
 
-    speed_mult = 1.0 + (1.0 - len(alive) / (ALIEN_ROWS * ALIEN_COLS)) * 2.0
-    speed = ALIEN_SPEED_BASE * speed_mult
+        draw_hud(screen, game.score, game.lives, remaining, win_w)
+        pygame.display.flip()
+        clock.tick(FPS)
 
-    hit_edge = any(
-        a.x + speed * game.alien_direction < 30 or
-        a.x + speed * game.alien_direction > game.fw - 30
-        for a in alive
-    )
-
-    if hit_edge:
-        game.alien_direction *= -1
-        for a in alive:
-            a.y += ALIEN_DESCENT
-            if a.y >= game.player_y - 30:
-                game.game_over = True
-                game.game_over_time = time.time()
-                return
-    else:
-        for a in alive:
-            a.x += speed * game.alien_direction
-
-    if random.random() < ALIEN_SHOOT_CHANCE:
-        shooter = random.choice(alive)
-        game.alien_bullets.append(Bullet(shooter.x, shooter.y + 18, is_alien=True))
-
-
-def render_frame(game, now, game_over, user_data):
-    """Render the game and push to display via user_data.set_frame."""
-    h, w = game.fh, game.fw
-    if (game._render_buffer is None or
-            game._render_buffer_shape != (h, w)):
-        game._render_buffer = np.zeros((h, w, 3), dtype=np.uint8)
-        game._render_buffer_shape = (h, w)
-    output = game._render_buffer
-    output[:] = BGR_DARK_BG
-
-    for sx, sy, brightness, size in game.stars:
-        twinkle = max(50, min(255, brightness + int(30 * math.sin(now * 2 + sx * 0.1))))
-        cv2.circle(output, (sx, sy), size, (twinkle, twinkle, twinkle), -1, cv2.LINE_AA)
-
-    for alien in game.aliens:
-        if alien.alive:
-            draw_alien(output, alien)
-
-    for b in game.bullets:
-        draw_bullet(output, b)
-    for b in game.alien_bullets:
-        draw_bullet(output, b)
-
-    draw_player_ship(output, game.player_x, game.player_y)
-
-    if game.player_x > 0:
-        cv2.circle(output, (int(game.player_x), int(game.player_y)),
-                   30, (0, 80, 0), 1, cv2.LINE_AA)
-
-    game.popups = [p for p in game.popups if p.alive()]
-    for p in game.popups:
-        alpha = p.alpha()
-        color = tuple(int(c * alpha) for c in p.colour)
-        cv2.putText(output, p.text, (int(p.x) - 25, p.current_y()),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
-
-    if not game_over:
-        remaining = max(0.0, GAME_DURATION - (now - game.game_start))
-        draw_hud(output, game.score, game.lives, remaining, w)
-    else:
-        draw_game_over(output, game.score, w, h)
-
-    # Convert in-place to BGR and push to display
-    cv2.cvtColor(output, cv2.COLOR_RGB2BGR, dst=output)
-    user_data.set_frame(output)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Callback class — wraps SharedState
-# ═══════════════════════════════════════════════════════════════════════════
-class SpaceInvadersCallback(app_callback_class):
-    """Bridges the camera callback thread and the game thread."""
-
-    def __init__(self):
-        super().__init__()
-        self.use_frame = True
-        self.shared = SharedState()
-
-    def set_frame(self, frame):
-        """Push a COPY of the frame to the display queue (thread-safe)."""
-        frame_copy = frame.copy()
-        while not self.frame_queue.empty():
-            try:
-                self.frame_queue.get_nowait()
-            except Exception:
-                break
-        try:
-            self.frame_queue.put_nowait(frame_copy)
-        except Exception:
-            pass
-
-    def stop(self):
-        self.shared.stop()
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# App — runs pipeline in a background thread, game in main thread
-# ═══════════════════════════════════════════════════════════════════════════
-class SpaceInvadersApp:
-    """Runs the GStreamer pose pipeline in a daemon thread, game in main thread."""
-
-    def __init__(self, callback, user_data, parser=None):
-        self._gst_app = GStreamerPoseEstimationApp(callback, user_data, parser)
-        self._user_data = user_data
-        self._game_thread = None
-
-    def run(self):
-        # Start game thread (daemon so it dies with the process)
-        self._game_thread = threading.Thread(
-            target=game_loop, args=(self._user_data,),
-            daemon=True, name='GameThread'
-        )
-        self._game_thread.start()
-
-        # Run the GStreamer pipeline in the main thread (blocks until done)
-        try:
-            self._gst_app.run()
-        except KeyboardInterrupt:
-            logger.info("Interrupted by user")
-        finally:
-            self._user_data.stop()
-            if self._game_thread and self._game_thread.is_alive():
-                self._game_thread.join(timeout=2.0)
-
-
-def main():
-    parser = get_pipeline_parser()
-    args, _ = parser.parse_known_args()
-
-    user_data = SpaceInvadersCallback()
-    app = SpaceInvadersApp(camera_callback, user_data, parser)
-    app.run()
+    # --- Cleanup ---
+    user_data.shared.stop()
+    try:
+        gst_app.pipeline.set_state(Gst.State.NULL)
+    except Exception:
+        pass
+    gst_thread.join(timeout=2.0)
+    pygame.quit()
+    sys.exit(0)
 
 
 if __name__ == "__main__":
