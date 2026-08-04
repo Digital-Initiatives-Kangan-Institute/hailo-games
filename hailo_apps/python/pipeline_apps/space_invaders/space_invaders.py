@@ -243,38 +243,40 @@ def draw_pip(surf, pip_frame, keypoints, width, height, player_x, player_y):
     # pygame.surfarray.make_surface expects (W, H, 3) layout
     pip_surf = pygame.surfarray.make_surface(pip_frame.swapaxes(0, 1))
     pip_surf = pygame.transform.scale(pip_surf, (PIP_W, PIP_H))
-
-    # Draw skeleton on the PiP (if keypoints available)
-    # Keypoints are normalised to bbox — scale to PiP dimensions
-    if keypoints:
-        # Use all 17 keypoints, already in 0-1 bbox space
-        kp_pixels = [(int(x * PIP_W), int(y * PIP_H)) for x, y in keypoints]
-
-        # Draw skeleton lines (green)
-        for a, b in COCO_SKELETON:
-            if a < len(kp_pixels) and b < len(kp_pixels):
-                pygame.draw.line(surf, (0, 255, 0),
-                                 (x0 + kp_pixels[a][0], y0 + kp_pixels[a][1]),
-                                 (x0 + kp_pixels[b][0], y0 + kp_pixels[b][1]), 1)
-
-        # Draw keypoint dots (wrists highlighted in yellow)
-        for i, (px, py) in enumerate(kp_pixels):
-            color = (0, 255, 255) if i in (LEFT_WRIST, RIGHT_WRIST) else (0, 220, 0)
-            radius = 4 if i in (LEFT_WRIST, RIGHT_WRIST) else 2
-            pygame.draw.circle(surf, color, (x0 + px, y0 + py), radius)
+    # Flip horizontally so the camera view matches a mirror (natural feel)
+    pip_surf = pygame.transform.flip(pip_surf, True, False)
 
     # --- Check if ship is inside the PiP area ---
     ship_in_pip = (x0 <= player_x <= x0 + PIP_W and
                    y0 <= player_y <= y0 + PIP_H)
 
-    # --- Apply fade if ship overlaps ---
+    # --- Apply fade to camera BEFORE drawing skeleton ---
     if ship_in_pip:
         # 25% opacity — darken the camera view
         fade = pygame.Surface((PIP_W, PIP_H), pygame.SRCALPHA)
         fade.fill((0, 0, 0, PIP_FADE_ALPHA))
         pip_surf.blit(fade, (0, 0))
 
-    # Blit the PiP to the main surface
+    # --- Draw skeleton ON TOP of the camera frame (on pip_surf, not surf) ---
+    # This ensures the skeleton is visible above the camera image,
+    # not hidden underneath it.
+    if keypoints:
+        # Mirror X so the skeleton aligns with the flipped camera frame
+        kp_pixels = [(int((1.0 - x) * PIP_W), int(y * PIP_H)) for x, y in keypoints]
+
+        # Skeleton lines (green)
+        for a, b in COCO_SKELETON:
+            if a < len(kp_pixels) and b < len(kp_pixels):
+                pygame.draw.line(pip_surf, (0, 255, 0),
+                                 kp_pixels[a], kp_pixels[b], 1)
+
+        # Keypoint dots (wrists highlighted in yellow)
+        for i, (px, py) in enumerate(kp_pixels):
+            color = (0, 255, 255) if i in (LEFT_WRIST, RIGHT_WRIST) else (0, 220, 0)
+            radius = 4 if i in (LEFT_WRIST, RIGHT_WRIST) else 2
+            pygame.draw.circle(pip_surf, color, (px, py), radius)
+
+    # Blit the PiP (with skeleton on top) to the main surface
     surf.blit(pip_surf, (x0, y0))
 
     # Border
