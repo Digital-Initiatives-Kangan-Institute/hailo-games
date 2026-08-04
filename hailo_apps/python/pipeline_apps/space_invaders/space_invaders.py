@@ -230,8 +230,15 @@ class SpaceInvadersCallback(app_callback_class):
         # PiP camera preview
         self.pip_frame = None
         self.skeleton_kps = []
-        self.pip_cache = None  # cached resized PiP frame
-        self.pip_cache_key = None  # (frame_id, frame_shape) to detect changes
+        self.pip_cache = None  # cached flipped+converted frame
+        self.pip_cache_shape = None  # (h, w) of cached frame
+        self.pip_skeleton_cache = None  # cached PiP with skeleton drawn
+        self.pip_last_update = 0.0  # last time PiP was updated
+        self.pip_update_interval = 0.1  # update PiP every 100ms (10 FPS for camera)
+
+        # Pre-allocated render buffer (reused every frame to avoid np.zeros)
+        self._render_buffer = None
+        self._render_buffer_shape = None
 
     def set_frame(self, frame):
         """Override to drain stale frames so display always shows the latest."""
@@ -299,8 +306,18 @@ def app_callback(element, buffer, user_data):
 
     now = time.time()
 
-    # Save raw frame for PiP before any rendering
-    user_data.pip_frame = cv2.flip(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), 1)
+    # Save raw frame for PiP - only update periodically to reduce overhead
+    now_for_pip = time.time()
+    if now_for_pip - user_data.pip_last_update >= user_data.pip_update_interval:
+        user_data.pip_last_update = now_for_pip
+        # Only convert+flip if frame shape changed
+        if user_data.pip_cache_shape != frame.shape[:2]:
+            user_data.pip_cache_shape = frame.shape[:2]
+            user_data.pip_cache = np.empty(frame.shape[:2] + (3,), dtype=np.uint8)
+        # Convert RGB→BGR and flip in one pass: flip then convert
+        flipped = cv2.flip(frame, 1)  # flip RGB
+        cv2.cvtColor(flipped, cv2.COLOR_RGB2BGR, dst=user_data.pip_cache)
+        user_data.pip_frame = user_data.pip_cache
 
     # Lazy init game clock
     if user_data.game_start is None:
@@ -322,7 +339,7 @@ def app_callback(element, buffer, user_data):
             return Gst.FlowReturn.OK
         output = _render_frame(user_data, width, height, now)
         _draw_game_over(output, user_data, width, height)
-        output = cv2.cvtColor(output, cv2.COLOR_RGB2BGR)
+        cv2.cvtColor(output, cv2.COLOR_RGB2BGR, dst=output)
         user_data.set_frame(output)
         return Gst.FlowReturn.OK
 
@@ -498,8 +515,8 @@ def app_callback(element, buffer, user_data):
     # --- Render ---
     output = _render_frame(user_data, width, height, now)
 
-    # Convert RGB → BGR for set_frame
-    output = cv2.cvtColor(output, cv2.COLOR_RGB2BGR)
+    # Convert RGB → BGR for set_frame (in-place to avoid allocation)
+    cv2.cvtColor(output, cv2.COLOR_RGB2BGR, dst=output)
     user_data.set_frame(output)
 
     return Gst.FlowReturn.OK
@@ -507,9 +524,13 @@ def app_callback(element, buffer, user_data):
 
 def _render_frame(user_data, width, height, now):
     """Render the full game frame (stars, aliens, bullets, player, HUD)."""
-    # Dark space background
-    output = np.zeros((height, width, 3), dtype=np.uint8)
-    output[:] = (8, 8, 24)  # dark blue-black
+    # Reuse pre-allocated buffer to avoid np.zeros every frame
+    if (user_data._render_buffer is None or
+            user_data._render_buffer_shape != (height, width)):
+        user_data._render_buffer = np.zeros((height, width, 3), dtype=np.uint8)
+        user_data._render_buffer_shape = (height, width)
+    output = user_data._render_buffer
+    output[:] = (8, 8, 24)  # dark blue-black (reset)
 
     # Stars (twinkling)
     for sx, sy, brightness, size in user_data.stars:
@@ -556,16 +577,13 @@ def _render_frame(user_data, width, height, now):
     if user_data.pip_frame is not None:
         ph, pw = user_data.pip_frame.shape[:2]
         if pw > 0 and ph > 0:
-            # Only resize if frame changed
-            frame_key = (pw, ph)
-            if user_data.pip_cache_key != frame_key:
-                scale = min(PIP_W / pw, PIP_H / ph)
-                new_w, new_h = int(pw * scale), int(ph * scale)
-                user_data.pip_cache = cv2.resize(user_data.pip_frame, (new_w, new_h))
-                user_data.pip_cache_key = frame_key
-            resized = user_data.pip_cache.copy()
-            new_h, new_w = resized.shape[:2]
-            # Draw skeleton on PiP
+            scale = min(PIP_W / pw, PIP_H / ph)
+            new_w, new_h = int(pw * scale), int(ph * scale)
+            # Only resize if size changed
+            if user_data.pip_skeleton_cache is None or user_data.pip_skeleton_cache.shape[:2] != (new_h, new_w):
+                user_data.pip_skeleton_cache = cv2.resize(user_data.pip_frame, (new_w, new_h))
+            # Draw skeleton on a fresh copy to avoid corrupting cache
+            pip_display = user_data.pip_skeleton_cache.copy()
             if user_data.skeleton_kps:
                 for a, b in COCO_SKELETON:
                     if a < len(user_data.skeleton_kps) and b < len(user_data.skeleton_kps):
@@ -573,17 +591,17 @@ def _render_frame(user_data, width, height, now):
                         ay = int(user_data.skeleton_kps[a][1] * new_h)
                         bx = int(user_data.skeleton_kps[b][0] * new_w)
                         by = int(user_data.skeleton_kps[b][1] * new_h)
-                        cv2.line(resized, (ax, ay), (bx, by), (0, 255, 0), 1)
+                        cv2.line(pip_display, (ax, ay), (bx, by), (0, 255, 0), 1)
                 for i, (xn, yn) in enumerate(user_data.skeleton_kps):
                     kx, ky = int(xn * new_w), int(yn * new_h)
                     r = 3 if i in (9, 10) else 2
                     col = (0, 255, 255) if i in (9, 10) else (0, 200, 0)
-                    cv2.circle(resized, (kx, ky), r, col, -1)
+                    cv2.circle(pip_display, (kx, ky), r, col, -1)
             x0 = width - new_w - PIP_MARGIN
             y0 = height - new_h - PIP_MARGIN
             cv2.rectangle(output, (x0 - 2, y0 - 2), (x0 + new_w + 2, y0 + new_h + 2), (200, 200, 200), 2)
             cv2.putText(output, "CAM", (x0 + 4, y0 + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-            output[y0:y0 + new_h, x0:x0 + new_w] = resized
+            output[y0:y0 + new_h, x0:x0 + new_w] = pip_display
 
     return output
 
