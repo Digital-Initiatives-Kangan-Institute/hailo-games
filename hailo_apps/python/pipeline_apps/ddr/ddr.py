@@ -138,7 +138,15 @@ class DDRCallback(app_callback_class):
         self.use_frame = True
         self.limb_x = [None] * len(LIMBS)
         self.pip_frame = None
-        self.skeleton_kps = []  # normalized keypoints for PiP skeleton
+        self.skeleton_kps = []
+        # PiP cache
+        self.pip_cache = None
+        self.pip_cache_shape = None
+        self.pip_last_update = 0.0
+        self.pip_update_interval = 0.1
+        # Pre-allocated render buffer
+        self._render_buffer = None
+        self._render_buffer_shape = None
 
     def set_frame(self, frame):
         while not self.frame_queue.empty():
@@ -164,7 +172,15 @@ def app_callback(element, buffer, user_data):
         return Gst.FlowReturn.OK
 
     # Save raw frame for PiP before any rendering
-    user_data.pip_frame = cv2.flip(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), 1)
+    # Save raw frame for PiP — throttled
+    now_for_pip = time.time()
+    if now_for_pip - user_data.pip_last_update >= user_data.pip_update_interval:
+        user_data.pip_last_update = now_for_pip
+        if user_data.pip_cache_shape != frame.shape[:2]:
+            user_data.pip_cache_shape = frame.shape[:2]
+            user_data.pip_cache = np.empty(frame.shape[:2] + (3,), dtype=np.uint8)
+        cv2.cvtColor(frame, cv2.COLOR_RGB2BGR, dst=user_data.pip_cache)
+        user_data.pip_frame = user_data.pip_cache
 
     # Extract limb positions
     roi = hailo.get_roi_from_buffer(buffer)
@@ -226,12 +242,16 @@ def app_callback(element, buffer, user_data):
 
     if remaining <= 0:
         # Game over — draw final screen
-        output = np.zeros((height, width, 3), dtype=np.uint8)
+        if (user_data._render_buffer is None or
+                user_data._render_buffer_shape != (height, width)):
+            user_data._render_buffer = np.zeros((height, width, 3), dtype=np.uint8)
+            user_data._render_buffer_shape = (height, width)
+        output = user_data._render_buffer
         output[:] = DARK_BG
         cv2.putText(output, "GAME OVER", (width // 2 - 140, height // 3), cv2.FONT_HERSHEY_SIMPLEX, 1.8, (70, 70, 255), 4)
         cv2.putText(output, f"SCORE: {user_data.score}", (width // 2 - 120, height // 3 + 70), cv2.FONT_HERSHEY_SIMPLEX, 1.0, WHITE, 2)
         cv2.putText(output, "Restarting in 5s...", (width // 2 - 140, height - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 180, 180), 2)
-        output = cv2.cvtColor(output, cv2.COLOR_RGB2BGR)
+        cv2.cvtColor(output, cv2.COLOR_RGB2BGR, dst=output)
         user_data.set_frame(output)
         return Gst.FlowReturn.OK
 
@@ -286,7 +306,11 @@ def app_callback(element, buffer, user_data):
     user_data.popups = [p for p in user_data.popups if p.alive()]
 
     # --- Render ---
-    output = np.zeros((height, width, 3), dtype=np.uint8)
+    if (user_data._render_buffer is None or
+            user_data._render_buffer_shape != (height, width)):
+        user_data._render_buffer = np.zeros((height, width, 3), dtype=np.uint8)
+        user_data._render_buffer_shape = (height, width)
+    output = user_data._render_buffer
     output[:] = DARK_BG
 
     # Column backgrounds
@@ -394,7 +418,7 @@ def app_callback(element, buffer, user_data):
             cv2.putText(output, "CAM", (x0 + 4, y0 + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
             output[y0:y0 + new_h, x0:x0 + new_w] = resized
 
-    output = cv2.cvtColor(output, cv2.COLOR_RGB2BGR)
+    cv2.cvtColor(output, cv2.COLOR_RGB2BGR, dst=output)
     user_data.set_frame(output)
 
     return Gst.FlowReturn.OK

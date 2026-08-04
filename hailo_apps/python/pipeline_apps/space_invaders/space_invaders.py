@@ -310,14 +310,15 @@ def app_callback(element, buffer, user_data):
     now_for_pip = time.time()
     if now_for_pip - user_data.pip_last_update >= user_data.pip_update_interval:
         user_data.pip_last_update = now_for_pip
-        # Only convert+flip if frame shape changed
+        # Only convert if frame shape changed
         if user_data.pip_cache_shape != frame.shape[:2]:
             user_data.pip_cache_shape = frame.shape[:2]
             user_data.pip_cache = np.empty(frame.shape[:2] + (3,), dtype=np.uint8)
-        # Convert RGB→BGR and flip in one pass: flip then convert
-        flipped = cv2.flip(frame, 1)  # flip RGB
-        cv2.cvtColor(flipped, cv2.COLOR_RGB2BGR, dst=user_data.pip_cache)
+        # Convert RGB→BGR in-place to cache buffer (no flip — ship moves naturally)
+        cv2.cvtColor(frame, cv2.COLOR_RGB2BGR, dst=user_data.pip_cache)
         user_data.pip_frame = user_data.pip_cache
+        # Invalidate skeleton cache so it gets re-resized from new frame
+        user_data.pip_skeleton_cache = None
 
     # Lazy init game clock
     if user_data.game_start is None:
@@ -579,11 +580,8 @@ def _render_frame(user_data, width, height, now):
         if pw > 0 and ph > 0:
             scale = min(PIP_W / pw, PIP_H / ph)
             new_w, new_h = int(pw * scale), int(ph * scale)
-            # Only resize if size changed
-            if user_data.pip_skeleton_cache is None or user_data.pip_skeleton_cache.shape[:2] != (new_h, new_w):
-                user_data.pip_skeleton_cache = cv2.resize(user_data.pip_frame, (new_w, new_h))
-            # Draw skeleton on a fresh copy to avoid corrupting cache
-            pip_display = user_data.pip_skeleton_cache.copy()
+            # Always re-resize from current pip_frame (pip_skeleton_cache invalidated on update)
+            pip_display = cv2.resize(user_data.pip_frame, (new_w, new_h))
             if user_data.skeleton_kps:
                 for a, b in COCO_SKELETON:
                     if a < len(user_data.skeleton_kps) and b < len(user_data.skeleton_kps):

@@ -390,7 +390,6 @@ def draw_pip(output, pip_frame, skeleton_kps, w, h):
     # Overlay the camera frame
     output[y0:y0 + new_h, x0:x0 + new_w] = resized
 
-
 def draw_hud(output, score, attempts, state, w, h):
     """Draw score and state banners."""
     # Score panel
@@ -431,6 +430,14 @@ class SoccerCallback(app_callback_class):
         self.leg_queue = queue.Queue(maxsize=4)
         self.pip_frame = None
         self.skeleton_kps = []  # normalized keypoints for PiP skeleton
+        # PiP cache — avoids re-converting camera frame every callback
+        self.pip_cache = None
+        self.pip_cache_shape = None
+        self.pip_last_update = 0.0
+        self.pip_update_interval = 0.1  # 10 FPS for camera preview
+        # Pre-allocated render buffer
+        self._render_buffer = None
+        self._render_buffer_shape = None
 
     def set_frame(self, frame):
         while not self.frame_queue.empty():
@@ -457,8 +464,15 @@ def app_callback(element, buffer, user_data):
     if frame is None:
         return Gst.FlowReturn.OK
 
-    # Save raw frame for PiP before any rendering
-    user_data.pip_frame = cv2.flip(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), 1)
+    # Save raw frame for PiP — throttled to reduce overhead
+    now_for_pip = time.time()
+    if now_for_pip - user_data.pip_last_update >= user_data.pip_update_interval:
+        user_data.pip_last_update = now_for_pip
+        if user_data.pip_cache_shape != frame.shape[:2]:
+            user_data.pip_cache_shape = frame.shape[:2]
+            user_data.pip_cache = np.empty(frame.shape[:2] + (3,), dtype=np.uint8)
+        cv2.cvtColor(frame, cv2.COLOR_RGB2BGR, dst=user_data.pip_cache)
+        user_data.pip_frame = user_data.pip_cache
 
     # Extract leg keypoints
     roi = hailo.get_roi_from_buffer(buffer)
@@ -611,8 +625,13 @@ def app_callback(element, buffer, user_data):
                 logger.info("KICK! vz=%.2f", kick_vz)
                 break
 
-    # Render
-    output = np.zeros((height, width, 3), dtype=np.uint8)
+    # Render — reuse pre-allocated buffer to avoid np.zeros every frame
+    if (user_data._render_buffer is None or
+            user_data._render_buffer_shape != (height, width)):
+        user_data._render_buffer = np.zeros((height, width, 3), dtype=np.uint8)
+        user_data._render_buffer_shape = (height, width)
+    output = user_data._render_buffer
+    output[:] = 0  # reset to black
     draw_field(output, width, height)
     draw_goal(output, width, height)
     draw_goalkeeper(output, gk, width, height)
@@ -624,7 +643,7 @@ def app_callback(element, buffer, user_data):
     draw_hud(output, user_data.score, user_data.attempts, user_data.state, width, height)
     draw_pip(output, user_data.pip_frame, user_data.skeleton_kps, width, height)
 
-    output = cv2.cvtColor(output, cv2.COLOR_RGB2BGR)
+    cv2.cvtColor(output, cv2.COLOR_RGB2BGR, dst=output)
     user_data.set_frame(output)
 
     return Gst.FlowReturn.OK

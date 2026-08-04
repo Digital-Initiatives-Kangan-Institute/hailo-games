@@ -172,6 +172,14 @@ class EasterGameCallback(app_callback_class):
         super().__init__()
         self.use_frame = True  # will be forced again in app __init__
 
+        # PiP cache — avoids re-converting camera frame every callback
+        self.pip_frame = None
+        self.pip_cache = None
+        self.pip_cache_shape = None
+        self.pip_last_update = 0.0
+        self.pip_update_interval = 0.1
+        self.skeleton_kps = []
+
         # Background
         raw = cv2.imread(background_path)
         if raw is None:
@@ -275,7 +283,15 @@ def app_callback(element, buffer, user_data):
     now = time.time()
 
     # Save raw frame for PiP before any rendering
-    user_data.pip_frame = cv2.flip(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), 1)
+    # Save raw frame for PiP — throttled
+    now_for_pip = time.time()
+    if now_for_pip - user_data.pip_last_update >= user_data.pip_update_interval:
+        user_data.pip_last_update = now_for_pip
+        if user_data.pip_cache_shape != frame.shape[:2]:
+            user_data.pip_cache_shape = frame.shape[:2]
+            user_data.pip_cache = np.empty(frame.shape[:2] + (3,), dtype=np.uint8)
+        cv2.cvtColor(frame, cv2.COLOR_RGB2BGR, dst=user_data.pip_cache)
+        user_data.pip_frame = user_data.pip_cache
 
     # Lazy init game clock
     if user_data.game_start is None:
@@ -294,7 +310,7 @@ def app_callback(element, buffer, user_data):
         # Draw game over screen
         output = user_data._get_bg(width, height)
         _draw_game_over(output, user_data)
-        output = cv2.cvtColor(output, cv2.COLOR_RGB2BGR)
+        cv2.cvtColor(output, cv2.COLOR_RGB2BGR, dst=output)
         user_data.set_frame(output)
         return Gst.FlowReturn.OK
 
@@ -460,7 +476,7 @@ def app_callback(element, buffer, user_data):
             output[y0:y0 + new_h, x0:x0 + new_w] = resized
 
     # Convert RGB → BGR for set_frame
-    output = cv2.cvtColor(output, cv2.COLOR_RGB2BGR)
+    cv2.cvtColor(output, cv2.COLOR_RGB2BGR, dst=output)
     user_data.set_frame(output)
 
     return Gst.FlowReturn.OK
