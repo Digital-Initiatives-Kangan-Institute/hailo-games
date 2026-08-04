@@ -4,26 +4,25 @@ Steer with your head, raise hands to fire, defend Earth from aliens.
 
 ## Description
 
-A classic Space Invaders game using pose estimation. Move your head left/right to steer the ship. Raise both hands above your head to fire a rapid burst of shots. Aliens descend in formation — destroy them all before they reach the bottom. Different alien rows are worth different points (10-40 pts). Aliens shoot back — getting hit costs a life. Survive the 90-second timer for the highest score.
+A classic Space Invaders game using Hailo pose estimation. Move your head left and right to steer the player ship across the bottom of the screen. Raise both hands above your head to fire a rapid burst of shots at the descending alien formation. Destroy all aliens to respawn the wave. Each alien row scores different points — the top red row is worth the most. Aliens shoot back, so dodge their red diamond bullets. The game ends when you lose all 3 lives, the aliens reach the bottom, or the 90-second timer runs out.
 
 ## How It Works
 
-- A classic Space Invaders alien formation descends from the top of the screen
-- **Move your head** left/right to steer the ship
-- **Raise both hands above your head** to fire a burst of shots
-- The ship also auto-fires at a steady pace
-- Destroy all aliens to respawn the formation; if aliens reach the bottom, it's game over
-- Different alien rows are worth different points (10–40 pts)
-- Aliens shoot back — getting hit costs a life (3 lives total)
-- 90-second countdown timer; game ends when time runs out or you lose all lives
-- Auto-restarts after a brief results screen
+- A grid of 4 × 6 aliens descends from the top in a side-to-side pattern
+- **Move your head** left/right to slide the green ship along the bottom
+- **Raise both hands above your head** to fire faster (rapid-fire gesture)
+- The ship also auto-fires at a steady rate
+- Aliens speed up as you destroy more of them
+- Each alien hit awards 10–40 points depending on the row
+- Aliens fire back — getting hit costs a life
+- Survive the 90-second timer for a high score
 
 ## Controls
 
 | Gesture | Action |
 |---------|--------|
-| Move head left/right | Steer the ship |
-| Raise both hands above head | Rapid fire |
+| Head left/right | Steer the ship |
+| Both hands above head | Rapid fire |
 | — | Auto-fire when idle |
 
 ## Requirements
@@ -38,16 +37,8 @@ A classic Space Invaders game using pose estimation. Move your head left/right t
 python3 space_invaders.py --input usb
 ```
 
-## Game Elements
+Or use the launch script:
 
-| Element | Description |
-|---------|-------------|
-| Red aliens (top row) | 40 pts each |
-| Orange aliens | 30 pts each |
-| Green aliens | 20 pts each |
-| Blue aliens (bottom row) | 10 pts each |
-| Green bullets | Player shots |
-| Red diamonds | Alien shots |
-| Green triangle | Player ship |
-| Score popup | "+N" floats up on hit |
-| "-1 LIFE" popup | Shown when hit by alien bullet |
+```bash
+./play_space_invaders.sh
+```
