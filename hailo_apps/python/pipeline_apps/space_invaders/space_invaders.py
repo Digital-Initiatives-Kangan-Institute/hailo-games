@@ -38,6 +38,11 @@ FIRE_COOLDOWN = 0.25        # seconds between shots
 POPUP_DURATION = 0.6        # seconds for score popups
 RESTART_DELAY = 5           # seconds before auto-restart
 
+# PiP constants
+PIP_W = 240
+PIP_H = 135
+PIP_MARGIN = 12
+
 # Keypoint indices
 NOSE = 0
 LEFT_WRIST = 9
