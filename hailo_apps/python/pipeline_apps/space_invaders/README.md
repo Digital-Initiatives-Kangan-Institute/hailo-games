@@ -1,6 +1,10 @@
 # Space Invaders
 
-An interactive Space Invaders game using Hailo pose estimation. Control the ship with your body!
+Steer with your head, raise hands to fire, defend Earth from aliens.
+
+## Description
+
+A classic Space Invaders game using pose estimation. Move your head left/right to steer the ship. Raise both hands above your head to fire a rapid burst of shots. Aliens descend in formation — destroy them all before they reach the bottom. Different alien rows are worth different points (10-40 pts). Aliens shoot back — getting hit costs a life. Survive the 90-second timer for the highest score.
 
 ## How It Works
 
@@ -21,6 +25,12 @@ An interactive Space Invaders game using Hailo pose estimation. Control the ship
 | Move head left/right | Steer the ship |
 | Raise both hands above head | Rapid fire |
 | — | Auto-fire when idle |
+
+## Requirements
+
+- Hailo-8/8L/10H accelerator
+- USB webcam or Raspberry Pi camera
+- Pose estimation model (auto-downloaded)
 
 ## Usage
 
