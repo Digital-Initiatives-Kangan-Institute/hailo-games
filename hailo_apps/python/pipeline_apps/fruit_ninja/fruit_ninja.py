@@ -29,6 +29,14 @@ logger = get_logger(__name__)
 LEFT_WRIST = 9
 RIGHT_WRIST = 10
 
+# COCO 17 skeleton connections
+COCO_SKELETON = [
+    (0, 1), (0, 2), (1, 3), (2, 4),       # head
+    (5, 7), (7, 9), (6, 8), (8, 10),       # arms
+    (5, 6), (5, 11), (6, 12), (11, 12),    # torso
+    (11, 13), (13, 15), (12, 14), (14, 16) # legs
+]
+
 # --- Game constants ---
 GAME_DURATION = 60
 LIVES = 3
@@ -279,7 +287,8 @@ class FruitNinjaCallback(app_callback_class):
         super().__init__()
         self.use_frame = True
         self.wrist_queues = [deque(maxlen=TRAIL_LEN) for _ in range(2)]
-        self.pip_frame = None  # raw camera frame for PiP
+        self.pip_frame = None
+        self.skeleton_kps = []  # normalized keypoints for PiP skeleton
 
     def set_frame(self, frame):
         while not self.frame_queue.empty():
@@ -328,6 +337,23 @@ def app_callback(element, buffer, user_data):
                 xpx = int(np.clip(xn * width, 0, width - 1))
                 ypx = int(np.clip(yn * height, 0, height - 1))
                 wrists.append((xpx, ypx))
+        break
+
+    # Extract all 17 keypoints for skeleton overlay on PiP
+    user_data.skeleton_kps = []
+    for detection in detections:
+        if detection.get_label() != "person":
+            continue
+        bbox = detection.get_bbox()
+        landmarks = detection.get_objects_typed(hailo.HAILO_LANDMARKS)
+        if not landmarks:
+            continue
+        pts = landmarks[0].get_points()
+        user_data.skeleton_kps = [
+            (pt.x() * bbox.width() + bbox.xmin(),
+             pt.y() * bbox.height() + bbox.ymin())
+            for pt in pts
+        ]
         break
 
     # Update wrist trails
@@ -488,13 +514,27 @@ def app_callback(element, buffer, user_data):
         secs_left = math.ceil(user_data.bomb_timeout / 60)
         cv2.putText(output, f"FROZEN {secs_left}s", (width // 2 - 60, height // 2), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (30, 80, 255), 3)
 
-    # PiP camera preview
+    # PiP camera preview with skeleton
     if user_data.pip_frame is not None:
         ph, pw = user_data.pip_frame.shape[:2]
         if pw > 0 and ph > 0:
             scale = min(PIP_W / pw, PIP_H / ph)
             new_w, new_h = int(pw * scale), int(ph * scale)
             resized = cv2.resize(user_data.pip_frame, (new_w, new_h))
+            # Draw skeleton on PiP
+            if user_data.skeleton_kps:
+                for a, b in COCO_SKELETON:
+                    if a < len(user_data.skeleton_kps) and b < len(user_data.skeleton_kps):
+                        ax = int(user_data.skeleton_kps[a][0] * new_w)
+                        ay = int(user_data.skeleton_kps[a][1] * new_h)
+                        bx = int(user_data.skeleton_kps[b][0] * new_w)
+                        by = int(user_data.skeleton_kps[b][1] * new_h)
+                        cv2.line(resized, (ax, ay), (bx, by), (0, 255, 0), 1)
+                for i, (xn, yn) in enumerate(user_data.skeleton_kps):
+                    kx, ky = int(xn * new_w), int(yn * new_h)
+                    r = 3 if i in (9, 10) else 2
+                    col = (0, 255, 255) if i in (9, 10) else (0, 200, 0)
+                    cv2.circle(resized, (kx, ky), r, col, -1)
             x0 = width - new_w - PIP_MARGIN
             y0 = height - new_h - PIP_MARGIN
             cv2.rectangle(output, (x0 - 2, y0 - 2), (x0 + new_w + 2, y0 + new_h + 2), (200, 200, 200), 2)

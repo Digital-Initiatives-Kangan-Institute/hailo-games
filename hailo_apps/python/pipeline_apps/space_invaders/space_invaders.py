@@ -48,6 +48,14 @@ NOSE = 0
 LEFT_WRIST = 9
 RIGHT_WRIST = 10
 
+# COCO 17 skeleton connections
+COCO_SKELETON = [
+    (0, 1), (0, 2), (1, 3), (2, 4),       # head
+    (5, 7), (7, 9), (6, 8), (8, 10),       # arms
+    (5, 6), (5, 11), (6, 12), (11, 12),    # torso
+    (11, 13), (13, 15), (12, 14), (14, 16) # legs
+]
+
 # Alien type point values (top rows worth more)
 ALIEN_POINTS = [40, 30, 20, 10]  # row 0 (top) → row 3 (bottom)
 
@@ -221,6 +229,9 @@ class SpaceInvadersCallback(app_callback_class):
 
         # PiP camera preview
         self.pip_frame = None
+        self.skeleton_kps = []
+        self.pip_cache = None  # cached resized PiP frame
+        self.pip_cache_key = None  # (frame_id, frame_shape) to detect changes
 
     def set_frame(self, frame):
         """Override to drain stale frames so display always shows the latest."""
@@ -360,6 +371,23 @@ def app_callback(element, buffer, user_data):
             both_hands_up = True
 
         break  # use first person detected
+
+    # Extract all 17 keypoints for skeleton overlay on PiP
+    user_data.skeleton_kps = []
+    for detection in detections:
+        if detection.get_label() != "person":
+            continue
+        bbox = detection.get_bbox()
+        landmarks = detection.get_objects_typed(hailo.HAILO_LANDMARKS)
+        if not landmarks:
+            continue
+        pts = landmarks[0].get_points()
+        user_data.skeleton_kps = [
+            (pt.x() * bbox.width() + bbox.xmin(),
+             pt.y() * bbox.height() + bbox.ymin())
+            for pt in pts
+        ]
+        break
 
     # --- Update player ship position ---
     if player_head_x is not None:
@@ -524,13 +552,33 @@ def _render_frame(user_data, width, height, now):
     remaining = max(0.0, GAME_DURATION - (now - user_data.game_start))
     _draw_hud(output, user_data.score, user_data.lives, remaining, width)
 
-    # PiP camera preview
+    # PiP camera preview with skeleton
     if user_data.pip_frame is not None:
         ph, pw = user_data.pip_frame.shape[:2]
         if pw > 0 and ph > 0:
-            scale = min(PIP_W / pw, PIP_H / ph)
-            new_w, new_h = int(pw * scale), int(ph * scale)
-            resized = cv2.resize(user_data.pip_frame, (new_w, new_h))
+            # Only resize if frame changed
+            frame_key = (pw, ph)
+            if user_data.pip_cache_key != frame_key:
+                scale = min(PIP_W / pw, PIP_H / ph)
+                new_w, new_h = int(pw * scale), int(ph * scale)
+                user_data.pip_cache = cv2.resize(user_data.pip_frame, (new_w, new_h))
+                user_data.pip_cache_key = frame_key
+            resized = user_data.pip_cache.copy()
+            new_h, new_w = resized.shape[:2]
+            # Draw skeleton on PiP
+            if user_data.skeleton_kps:
+                for a, b in COCO_SKELETON:
+                    if a < len(user_data.skeleton_kps) and b < len(user_data.skeleton_kps):
+                        ax = int(user_data.skeleton_kps[a][0] * new_w)
+                        ay = int(user_data.skeleton_kps[a][1] * new_h)
+                        bx = int(user_data.skeleton_kps[b][0] * new_w)
+                        by = int(user_data.skeleton_kps[b][1] * new_h)
+                        cv2.line(resized, (ax, ay), (bx, by), (0, 255, 0), 1)
+                for i, (xn, yn) in enumerate(user_data.skeleton_kps):
+                    kx, ky = int(xn * new_w), int(yn * new_h)
+                    r = 3 if i in (9, 10) else 2
+                    col = (0, 255, 255) if i in (9, 10) else (0, 200, 0)
+                    cv2.circle(resized, (kx, ky), r, col, -1)
             x0 = width - new_w - PIP_MARGIN
             y0 = height - new_h - PIP_MARGIN
             cv2.rectangle(output, (x0 - 2, y0 - 2), (x0 + new_w + 2, y0 + new_h + 2), (200, 200, 200), 2)

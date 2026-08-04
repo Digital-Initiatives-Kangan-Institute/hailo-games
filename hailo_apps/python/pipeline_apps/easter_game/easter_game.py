@@ -45,6 +45,14 @@ PIP_MARGIN = 12
 LEFT_WRIST = 9
 RIGHT_WRIST = 10
 
+# COCO 17 skeleton connections
+COCO_SKELETON = [
+    (0, 1), (0, 2), (1, 3), (2, 4),       # head
+    (5, 7), (7, 9), (6, 8), (8, 10),       # arms
+    (5, 6), (5, 11), (6, 12), (11, 12),    # torso
+    (11, 13), (13, 15), (12, 14), (14, 16) # legs
+]
+
 # Player name pool
 PLAYER_NAMES = [
     "Red Fox", "Blue Jay", "Gold Cat", "Green Owl", "Pink Bear",
@@ -196,6 +204,7 @@ class EasterGameCallback(app_callback_class):
 
         # PiP camera preview
         self.pip_frame = None
+        self.skeleton_kps = []  # normalized keypoints for PiP skeleton
 
     # --- helpers ---
     def set_frame(self, frame):
@@ -353,6 +362,23 @@ def app_callback(element, buffer, user_data):
                     # Spawn next
                     user_data.spawn_item()
 
+    # Extract all 17 keypoints for skeleton overlay on PiP (first person)
+    user_data.skeleton_kps = []
+    for detection in detections:
+        if detection.get_label() != "person":
+            continue
+        bbox = detection.get_bbox()
+        landmarks = detection.get_objects_typed(hailo.HAILO_LANDMARKS)
+        if not landmarks:
+            continue
+        pts = landmarks[0].get_points()
+        user_data.skeleton_kps = [
+            (pt.x() * bbox.width() + bbox.xmin(),
+             pt.y() * bbox.height() + bbox.ymin())
+            for pt in pts
+        ]
+        break
+
     # --- Render ---
     output = user_data._get_bg(width, height)
 
@@ -406,13 +432,27 @@ def app_callback(element, buffer, user_data):
     # Leaderboard on right
     _draw_leaderboard(output, user_data.players, width, height)
 
-    # PiP camera preview
+    # PiP camera preview with skeleton
     if user_data.pip_frame is not None:
         ph, pw = user_data.pip_frame.shape[:2]
         if pw > 0 and ph > 0:
             scale = min(PIP_W / pw, PIP_H / ph)
             new_w, new_h = int(pw * scale), int(ph * scale)
             resized = cv2.resize(user_data.pip_frame, (new_w, new_h))
+            # Draw skeleton on PiP
+            if user_data.skeleton_kps:
+                for a, b in COCO_SKELETON:
+                    if a < len(user_data.skeleton_kps) and b < len(user_data.skeleton_kps):
+                        ax = int(user_data.skeleton_kps[a][0] * new_w)
+                        ay = int(user_data.skeleton_kps[a][1] * new_h)
+                        bx = int(user_data.skeleton_kps[b][0] * new_w)
+                        by = int(user_data.skeleton_kps[b][1] * new_h)
+                        cv2.line(resized, (ax, ay), (bx, by), (0, 255, 0), 1)
+                for i, (xn, yn) in enumerate(user_data.skeleton_kps):
+                    kx, ky = int(xn * new_w), int(yn * new_h)
+                    r = 3 if i in (9, 10) else 2
+                    col = (0, 255, 255) if i in (9, 10) else (0, 200, 0)
+                    cv2.circle(resized, (kx, ky), r, col, -1)
             x0 = width - new_w - PIP_MARGIN
             y0 = height - new_h - PIP_MARGIN
             cv2.rectangle(output, (x0 - 2, y0 - 2), (x0 + new_w + 2, y0 + new_h + 2), (200, 200, 200), 2)
