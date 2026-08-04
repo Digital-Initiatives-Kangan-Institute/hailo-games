@@ -33,13 +33,8 @@ LEFT_ANKLE = 15; RIGHT_ANKLE = 16
 ANKLE_INDICES = [LEFT_ANKLE, RIGHT_ANKLE]
 LEG_KEYPOINTS = [LEFT_HIP, RIGHT_HIP, LEFT_KNEE, RIGHT_KNEE, LEFT_ANKLE, RIGHT_ANKLE]
 
-# COCO 17 skeleton connections
-COCO_SKELETON = [
-    (0, 1), (0, 2), (1, 3), (2, 4),       # head
-    (5, 7), (7, 9), (6, 8), (8, 10),       # arms
-    (5, 6), (5, 11), (6, 12), (11, 12),    # torso
-    (11, 13), (13, 15), (12, 14), (14, 16) # legs
-]
+# Mirror camera input on X axis
+MIRROR_X = True
 
 # --- Game constants ---
 GAME_DURATION = 90          # seconds
@@ -345,51 +340,6 @@ def draw_leg_skeleton(output, leg_pos, w, h, kick_cd, ball_sx, ball_sy):
         cv2.circle(output, (fx, fy), 11, WHITE, 2)
 
 
-# ─── PiP camera preview ──────────────────────────────────────────────────────
-PIP_W = 240
-PIP_H = 135
-PIP_MARGIN = 12
-
-def draw_pip(output, pip_frame, skeleton_kps, w, h):
-    """Overlay a small camera preview with skeleton in the bottom-right corner."""
-    if pip_frame is None:
-        return
-    ph, pw = pip_frame.shape[:2]
-    if pw == 0 or ph == 0:
-        return
-    # Scale to PIP size
-    scale = min(PIP_W / pw, PIP_H / ph)
-    new_w = int(pw * scale)
-    new_h = int(ph * scale)
-    resized = cv2.resize(pip_frame, (new_w, new_h))
-
-    # Draw skeleton overlay on PiP
-    if skeleton_kps:
-        for a, b in COCO_SKELETON:
-            if a < len(skeleton_kps) and b < len(skeleton_kps):
-                ax = int(skeleton_kps[a][0] * new_w)
-                ay = int(skeleton_kps[a][1] * new_h)
-                bx = int(skeleton_kps[b][0] * new_w)
-                by = int(skeleton_kps[b][1] * new_h)
-                cv2.line(resized, (ax, ay), (bx, by), (0, 255, 0), 1)
-        for i, (xn, yn) in enumerate(skeleton_kps):
-            kx = int(xn * new_w)
-            ky = int(yn * new_h)
-            r = 3 if i in (9, 10) else 2  # wrists bigger
-            col = (0, 255, 255) if i in (9, 10) else (0, 200, 0)
-            cv2.circle(resized, (kx, ky), r, col, -1)
-
-    # Position bottom-right
-    x0 = w - new_w - PIP_MARGIN
-    y0 = h - new_h - PIP_MARGIN
-
-    # Border
-    cv2.rectangle(output, (x0 - 2, y0 - 2), (x0 + new_w + 2, y0 + new_h + 2), (200, 200, 200), 2)
-    # Label
-    cv2.putText(output, "CAM", (x0 + 4, y0 + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-    # Overlay the camera frame
-    output[y0:y0 + new_h, x0:x0 + new_w] = resized
-
 def draw_hud(output, score, attempts, state, w, h):
     """Draw score and state banners."""
     # Score panel
@@ -428,13 +378,6 @@ class SoccerCallback(app_callback_class):
         super().__init__()
         self.use_frame = True
         self.leg_queue = queue.Queue(maxsize=4)
-        self.pip_frame = None
-        self.skeleton_kps = []  # normalized keypoints for PiP skeleton
-        # PiP cache — avoids re-converting camera frame every callback
-        self.pip_cache = None
-        self.pip_cache_shape = None
-        self.pip_last_update = 0.0
-        self.pip_update_interval = 0.1  # 10 FPS for camera preview
         # Pre-allocated render buffer
         self._render_buffer = None
         self._render_buffer_shape = None
@@ -464,16 +407,6 @@ def app_callback(element, buffer, user_data):
     if frame is None:
         return Gst.FlowReturn.OK
 
-    # Save raw frame for PiP — throttled to reduce overhead
-    now_for_pip = time.time()
-    if now_for_pip - user_data.pip_last_update >= user_data.pip_update_interval:
-        user_data.pip_last_update = now_for_pip
-        if user_data.pip_cache_shape != frame.shape[:2]:
-            user_data.pip_cache_shape = frame.shape[:2]
-            user_data.pip_cache = np.empty(frame.shape[:2] + (3,), dtype=np.uint8)
-        cv2.cvtColor(frame, cv2.COLOR_RGB2BGR, dst=user_data.pip_cache)
-        user_data.pip_frame = user_data.pip_cache
-
     # Extract leg keypoints
     roi = hailo.get_roi_from_buffer(buffer)
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
@@ -490,27 +423,13 @@ def app_callback(element, buffer, user_data):
         for idx in LEG_KEYPOINTS:
             if idx < len(pts):
                 pt = pts[idx]
+                xn = pt.x() * bbox.width() + bbox.xmin()
+                if MIRROR_X:
+                    xn = 1.0 - xn
                 leg_pos[idx] = (
-                    float(pt.x() * bbox.width() + bbox.xmin()),
+                    float(xn),
                     float(pt.y() * bbox.height() + bbox.ymin()),
                 )
-        break
-
-    # Extract all 17 keypoints for skeleton overlay on PiP
-    user_data.skeleton_kps = []
-    for detection in detections:
-        if detection.get_label() != "person":
-            continue
-        bbox = detection.get_bbox()
-        landmarks = detection.get_objects_typed(hailo.HAILO_LANDMARKS)
-        if not landmarks:
-            continue
-        pts = landmarks[0].get_points()
-        user_data.skeleton_kps = [
-            (pt.x() * bbox.width() + bbox.xmin(),
-             pt.y() * bbox.height() + bbox.ymin())
-            for pt in pts
-        ]
         break
 
     # Get game state from user_data (set in main loop)
@@ -641,7 +560,6 @@ def app_callback(element, buffer, user_data):
     bsx, bsy = (bp[0], bp[1]) if bp else (width // 2, int(height * 0.85))
     draw_leg_skeleton(output, leg_pos, width, height, user_data.kick_cd, bsx, bsy)
     draw_hud(output, user_data.score, user_data.attempts, user_data.state, width, height)
-    draw_pip(output, user_data.pip_frame, user_data.skeleton_kps, width, height)
 
     cv2.cvtColor(output, cv2.COLOR_RGB2BGR, dst=output)
     user_data.set_frame(output)

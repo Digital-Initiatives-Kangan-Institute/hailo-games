@@ -29,13 +29,8 @@ logger = get_logger(__name__)
 LEFT_WRIST = 9
 RIGHT_WRIST = 10
 
-# COCO 17 skeleton connections
-COCO_SKELETON = [
-    (0, 1), (0, 2), (1, 3), (2, 4),       # head
-    (5, 7), (7, 9), (6, 8), (8, 10),       # arms
-    (5, 6), (5, 11), (6, 12), (11, 12),    # torso
-    (11, 13), (13, 15), (12, 14), (14, 16) # legs
-]
+# Mirror camera input on X axis
+MIRROR_X = True
 
 # --- Game constants ---
 GAME_DURATION = 60
@@ -66,11 +61,6 @@ FRUIT_TYPES = [
 
 # Blade colours per hand (BGR)
 BLADE_COLORS = [(255, 210, 80), (55, 155, 255)]
-
-# PiP constants
-PIP_W = 240
-PIP_H = 135
-PIP_MARGIN = 12
 
 # Colours
 BLACK = (0, 0, 0)
@@ -287,13 +277,6 @@ class FruitNinjaCallback(app_callback_class):
         super().__init__()
         self.use_frame = True
         self.wrist_queues = [deque(maxlen=TRAIL_LEN) for _ in range(2)]
-        self.pip_frame = None
-        self.skeleton_kps = []
-        # PiP cache
-        self.pip_cache = None
-        self.pip_cache_shape = None
-        self.pip_last_update = 0.0
-        self.pip_update_interval = 0.1
         # Pre-allocated render buffer
         self._render_buffer = None
         self._render_buffer_shape = None
@@ -321,17 +304,6 @@ def app_callback(element, buffer, user_data):
     if frame is None:
         return Gst.FlowReturn.OK
 
-    # Save raw frame for PiP before any rendering
-    # Save raw frame for PiP — throttled
-    now_for_pip = time.time()
-    if now_for_pip - user_data.pip_last_update >= user_data.pip_update_interval:
-        user_data.pip_last_update = now_for_pip
-        if user_data.pip_cache_shape != frame.shape[:2]:
-            user_data.pip_cache_shape = frame.shape[:2]
-            user_data.pip_cache = np.empty(frame.shape[:2] + (3,), dtype=np.uint8)
-        cv2.cvtColor(frame, cv2.COLOR_RGB2BGR, dst=user_data.pip_cache)
-        user_data.pip_frame = user_data.pip_cache
-
     # Extract wrist positions
     roi = hailo.get_roi_from_buffer(buffer)
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
@@ -349,27 +321,12 @@ def app_callback(element, buffer, user_data):
             for pt_idx in (LEFT_WRIST, RIGHT_WRIST):
                 pt = pts[pt_idx]
                 xn = pt.x() * bbox.width() + bbox.xmin()
+                if MIRROR_X:
+                    xn = 1.0 - xn
                 yn = pt.y() * bbox.height() + bbox.ymin()
                 xpx = int(np.clip(xn * width, 0, width - 1))
                 ypx = int(np.clip(yn * height, 0, height - 1))
                 wrists.append((xpx, ypx))
-        break
-
-    # Extract all 17 keypoints for skeleton overlay on PiP
-    user_data.skeleton_kps = []
-    for detection in detections:
-        if detection.get_label() != "person":
-            continue
-        bbox = detection.get_bbox()
-        landmarks = detection.get_objects_typed(hailo.HAILO_LANDMARKS)
-        if not landmarks:
-            continue
-        pts = landmarks[0].get_points()
-        user_data.skeleton_kps = [
-            (pt.x() * bbox.width() + bbox.xmin(),
-             pt.y() * bbox.height() + bbox.ymin())
-            for pt in pts
-        ]
         break
 
     # Update wrist trails
@@ -537,33 +494,6 @@ def app_callback(element, buffer, user_data):
     if user_data.bomb_timeout > 0:
         secs_left = math.ceil(user_data.bomb_timeout / 60)
         cv2.putText(output, f"FROZEN {secs_left}s", (width // 2 - 60, height // 2), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (30, 80, 255), 3)
-
-    # PiP camera preview with skeleton
-    if user_data.pip_frame is not None:
-        ph, pw = user_data.pip_frame.shape[:2]
-        if pw > 0 and ph > 0:
-            scale = min(PIP_W / pw, PIP_H / ph)
-            new_w, new_h = int(pw * scale), int(ph * scale)
-            resized = cv2.resize(user_data.pip_frame, (new_w, new_h))
-            # Draw skeleton on PiP
-            if user_data.skeleton_kps:
-                for a, b in COCO_SKELETON:
-                    if a < len(user_data.skeleton_kps) and b < len(user_data.skeleton_kps):
-                        ax = int(user_data.skeleton_kps[a][0] * new_w)
-                        ay = int(user_data.skeleton_kps[a][1] * new_h)
-                        bx = int(user_data.skeleton_kps[b][0] * new_w)
-                        by = int(user_data.skeleton_kps[b][1] * new_h)
-                        cv2.line(resized, (ax, ay), (bx, by), (0, 255, 0), 1)
-                for i, (xn, yn) in enumerate(user_data.skeleton_kps):
-                    kx, ky = int(xn * new_w), int(yn * new_h)
-                    r = 3 if i in (9, 10) else 2
-                    col = (0, 255, 255) if i in (9, 10) else (0, 200, 0)
-                    cv2.circle(resized, (kx, ky), r, col, -1)
-            x0 = width - new_w - PIP_MARGIN
-            y0 = height - new_h - PIP_MARGIN
-            cv2.rectangle(output, (x0 - 2, y0 - 2), (x0 + new_w + 2, y0 + new_h + 2), (200, 200, 200), 2)
-            cv2.putText(output, "CAM", (x0 + 4, y0 + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-            output[y0:y0 + new_h, x0:x0 + new_w] = resized
 
     cv2.cvtColor(output, cv2.COLOR_RGB2BGR, dst=output)
     user_data.set_frame(output)

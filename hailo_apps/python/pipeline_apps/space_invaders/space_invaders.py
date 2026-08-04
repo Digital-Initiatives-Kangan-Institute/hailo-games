@@ -38,23 +38,17 @@ FIRE_COOLDOWN = 0.25        # seconds between shots
 POPUP_DURATION = 0.6        # seconds for score popups
 RESTART_DELAY = 5           # seconds before auto-restart
 
-# PiP constants
-PIP_W = 240
-PIP_H = 135
-PIP_MARGIN = 12
+# Mirror camera input on X axis (so head left = ship left)
+MIRROR_X = True
+
+# Frame delay (seconds) — small sleep to avoid maxing out CPU.
+# 0.033 = ~30 FPS cap, 0.016 = ~60 FPS cap, 0.0 = no delay.
+FRAME_DELAY = 0.033
 
 # Keypoint indices
 NOSE = 0
 LEFT_WRIST = 9
 RIGHT_WRIST = 10
-
-# COCO 17 skeleton connections
-COCO_SKELETON = [
-    (0, 1), (0, 2), (1, 3), (2, 4),       # head
-    (5, 7), (7, 9), (6, 8), (8, 10),       # arms
-    (5, 6), (5, 11), (6, 12), (11, 12),    # torso
-    (11, 13), (13, 15), (12, 14), (14, 16) # legs
-]
 
 # Alien type point values (top rows worth more)
 ALIEN_POINTS = [40, 30, 20, 10]  # row 0 (top) → row 3 (bottom)
@@ -66,6 +60,7 @@ ALIEN_COLORS = [
     (60, 220, 60),      # green
     (60, 180, 255),     # blue (bottom row)
 ]
+
 
 INITIAL_LIVES = 3
 
@@ -227,15 +222,6 @@ class SpaceInvadersCallback(app_callback_class):
         self.fw = 0
         self.fh = 0
 
-        # PiP camera preview
-        self.pip_frame = None
-        self.skeleton_kps = []
-        self.pip_cache = None  # cached flipped+converted frame
-        self.pip_cache_shape = None  # (h, w) of cached frame
-        self.pip_skeleton_cache = None  # cached PiP with skeleton drawn
-        self.pip_last_update = 0.0  # last time PiP was updated
-        self.pip_update_interval = 0.1  # update PiP every 100ms (10 FPS for camera)
-
         # Pre-allocated render buffer (reused every frame to avoid np.zeros)
         self._render_buffer = None
         self._render_buffer_shape = None
@@ -306,20 +292,6 @@ def app_callback(element, buffer, user_data):
 
     now = time.time()
 
-    # Save raw frame for PiP - only update periodically to reduce overhead
-    now_for_pip = time.time()
-    if now_for_pip - user_data.pip_last_update >= user_data.pip_update_interval:
-        user_data.pip_last_update = now_for_pip
-        # Only convert if frame shape changed
-        if user_data.pip_cache_shape != frame.shape[:2]:
-            user_data.pip_cache_shape = frame.shape[:2]
-            user_data.pip_cache = np.empty(frame.shape[:2] + (3,), dtype=np.uint8)
-        # Convert RGB→BGR in-place to cache buffer (no flip — ship moves naturally)
-        cv2.cvtColor(frame, cv2.COLOR_RGB2BGR, dst=user_data.pip_cache)
-        user_data.pip_frame = user_data.pip_cache
-        # Invalidate skeleton cache so it gets re-resized from new frame
-        user_data.pip_skeleton_cache = None
-
     # Lazy init game clock
     if user_data.game_start is None:
         user_data.game_start = now
@@ -377,7 +349,10 @@ def app_callback(element, buffer, user_data):
         # Nose for head tracking
         nose = points[NOSE]
         nose_y = (nose.y() * bbox.height() + bbox.ymin()) * height
-        player_head_x = (nose.x() * bbox.width() + bbox.xmin()) * width
+        nose_x_norm = nose.x() * bbox.width() + bbox.xmin()
+        if MIRROR_X:
+            nose_x_norm = 1.0 - nose_x_norm
+        player_head_x = nose_x_norm * width
 
         # Check if both wrists are above the head (y increases downward)
         lw = points[LEFT_WRIST]
@@ -389,23 +364,6 @@ def app_callback(element, buffer, user_data):
             both_hands_up = True
 
         break  # use first person detected
-
-    # Extract all 17 keypoints for skeleton overlay on PiP
-    user_data.skeleton_kps = []
-    for detection in detections:
-        if detection.get_label() != "person":
-            continue
-        bbox = detection.get_bbox()
-        landmarks = detection.get_objects_typed(hailo.HAILO_LANDMARKS)
-        if not landmarks:
-            continue
-        pts = landmarks[0].get_points()
-        user_data.skeleton_kps = [
-            (pt.x() * bbox.width() + bbox.xmin(),
-             pt.y() * bbox.height() + bbox.ymin())
-            for pt in pts
-        ]
-        break
 
     # --- Update player ship position ---
     if player_head_x is not None:
@@ -520,6 +478,10 @@ def app_callback(element, buffer, user_data):
     cv2.cvtColor(output, cv2.COLOR_RGB2BGR, dst=output)
     user_data.set_frame(output)
 
+    # Throttle to avoid exhausting CPU
+    if FRAME_DELAY > 0:
+        time.sleep(FRAME_DELAY)
+
     return Gst.FlowReturn.OK
 
 
@@ -573,33 +535,6 @@ def _render_frame(user_data, width, height, now):
     # HUD
     remaining = max(0.0, GAME_DURATION - (now - user_data.game_start))
     _draw_hud(output, user_data.score, user_data.lives, remaining, width)
-
-    # PiP camera preview with skeleton
-    if user_data.pip_frame is not None:
-        ph, pw = user_data.pip_frame.shape[:2]
-        if pw > 0 and ph > 0:
-            scale = min(PIP_W / pw, PIP_H / ph)
-            new_w, new_h = int(pw * scale), int(ph * scale)
-            # Always re-resize from current pip_frame (pip_skeleton_cache invalidated on update)
-            pip_display = cv2.resize(user_data.pip_frame, (new_w, new_h))
-            if user_data.skeleton_kps:
-                for a, b in COCO_SKELETON:
-                    if a < len(user_data.skeleton_kps) and b < len(user_data.skeleton_kps):
-                        ax = int(user_data.skeleton_kps[a][0] * new_w)
-                        ay = int(user_data.skeleton_kps[a][1] * new_h)
-                        bx = int(user_data.skeleton_kps[b][0] * new_w)
-                        by = int(user_data.skeleton_kps[b][1] * new_h)
-                        cv2.line(pip_display, (ax, ay), (bx, by), (0, 255, 0), 1)
-                for i, (xn, yn) in enumerate(user_data.skeleton_kps):
-                    kx, ky = int(xn * new_w), int(yn * new_h)
-                    r = 3 if i in (9, 10) else 2
-                    col = (0, 255, 255) if i in (9, 10) else (0, 200, 0)
-                    cv2.circle(pip_display, (kx, ky), r, col, -1)
-            x0 = width - new_w - PIP_MARGIN
-            y0 = height - new_h - PIP_MARGIN
-            cv2.rectangle(output, (x0 - 2, y0 - 2), (x0 + new_w + 2, y0 + new_h + 2), (200, 200, 200), 2)
-            cv2.putText(output, "CAM", (x0 + 4, y0 + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-            output[y0:y0 + new_h, x0:x0 + new_w] = pip_display
 
     return output
 
