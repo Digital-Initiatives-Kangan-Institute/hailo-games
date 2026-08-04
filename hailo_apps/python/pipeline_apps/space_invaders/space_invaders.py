@@ -289,14 +289,18 @@ class SpaceInvadersCallback(app_callback_class):
         self._frame_counter = 0
 
     def set_frame(self, frame):
-        """Drain stale frames so display always shows the latest."""
+        """Give the display its own COPY of the frame so the callback
+        can safely overwrite the render buffer on the next frame.
+        Without this copy, the display thread reads from a buffer
+        that the callback is actively writing to → flashing/tearing."""
+        frame_copy = frame.copy()
         while not self.frame_queue.empty():
             try:
                 self.frame_queue.get_nowait()
             except Exception:
                 break
         try:
-            self.frame_queue.put_nowait(frame)
+            self.frame_queue.put_nowait(frame_copy)
         except Exception:
             pass
 
